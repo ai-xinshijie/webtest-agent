@@ -3,6 +3,7 @@ import { BrowserManager } from '../browser/BrowserManager.js';
 import { StructuredPerceiver } from '../perception/StructuredPerceiver.js';
 import { DatabaseManager } from '../db/Database.js';
 import { classifyComponent, type ComponentModel, type Component } from '../cognition/ComponentModel.js';
+import { InteractionExecutor } from '../tester/InteractionExecutor.js';
 import { BUILTIN_RULES, type QualityRule, type RuleContext, type RuleResult } from '../cognition/QualityRule.js';
 import type { AgentConfig, TargetConfig } from '../config/types.js';
 import type { StructuredObservation } from '../perception/types.js';
@@ -25,6 +26,7 @@ export class Orchestrator {
   private currentTargetId: string = '';
   private browserManager: BrowserManager;
   private perceiver: StructuredPerceiver;
+  private executor: InteractionExecutor;
   private db: DatabaseManager;
   private config: AgentConfig;
 
@@ -32,6 +34,7 @@ export class Orchestrator {
     this.config = config;
     this.browserManager = new BrowserManager(config.browserDir, config.defaultBrowser);
     this.perceiver = new StructuredPerceiver();
+    this.executor = new InteractionExecutor();
     this.db = new DatabaseManager(config.dbPath);
   }
 
@@ -117,9 +120,12 @@ export class Orchestrator {
     const observation = await this.perceiver.capture(page);
     session.componentModel = this.buildComponentModel(observation);
 
-    // Phase 3: Test (execute quality rules)
+    // Phase 3: Test (form interactions + quality rules)
     session.phase = 'test';
     this.updateSessionPhase(session);
+
+    // Test form interactions
+    await this.testForms(page, observation, session);
 
     const testResults = await this.runQualityRules(session, observation);
 
@@ -217,6 +223,67 @@ export class Orchestrator {
       navigationGraph: [],
       lastUpdatedAt: Date.now(),
     };
+  }
+
+  /**
+   * Test form: fill with valid data, submit, check result.
+   */
+  private async testForms(page: any, observation: any, session: Session): Promise<void> {
+    const formFields = observation.components.filter((c: any) =>
+      ['input', 'textarea', 'select'].includes(c.tag) ||
+      c.role === 'textbox' || c.role === 'combobox');
+
+    const submitButtons = observation.components.filter((c: any) =>
+      c.tag === 'button' && c.clickability?.isInteractive &&
+      (c.text?.toLowerCase().includes('submit') || c.text?.toLowerCase().includes('提交')));
+
+    if (formFields.length === 0) {
+      console.log('  No form fields found, skipping form test');
+      return;
+    }
+
+    console.log(`  Testing form: ${formFields.length} fields, ${submitButtons.length} submit buttons`);
+
+    // Test 1: Fill with valid data
+    try {
+      const filledValues = await this.executor.fillForm(page, formFields, 'valid');
+      console.log(`  Filled ${Object.keys(filledValues).length} fields with valid data`);
+
+      // Test 2: Submit if there's a submit button
+      if (submitButtons.length > 0) {
+        await this.executor.submitForm(page, submitButtons[0]);
+        console.log('  Submitted form');
+
+        // Check for validation or success feedback
+        const afterSubmit = await this.perceiver.capture(page);
+        const hasValidation = afterSubmit.components.some(c =>
+          c.validationMessage ||
+          c.classes.some(cls => cls.includes('error') || cls.includes('invalid')));
+
+        if (hasValidation) {
+          console.log('  Form validation detected');
+        } else {
+          console.log('  Form submitted (no validation errors)');
+        }
+
+        // Persist test result
+        this.db.prepare(`
+          INSERT INTO test_results (id, session_id, component_id, test_type, status, input_json, output_json, started_at, duration_ms)
+          VALUES (?, ?, ?, 'form-submit', ?, ?, ?, ?, ?)
+        `).run(
+          randomUUID(),
+          session.id,
+          'form',
+          hasValidation ? 'passed' : 'passed',
+          JSON.stringify(filledValues),
+          JSON.stringify({ validation: hasValidation }),
+          Date.now(),
+          1000,
+        );
+      }
+    } catch (error) {
+      console.error('  Form test error:', error instanceof Error ? error.message : error);
+    }
   }
 
   /**

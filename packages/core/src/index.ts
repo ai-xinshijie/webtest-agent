@@ -5,6 +5,7 @@ export { DatabaseManager } from './db/Database.js';
 export { LLMRouter } from './llm/LLMRouter.js';
 export { AgentSelfHealer } from './healing/AgentSelfHealer.js';
 export { ExplorationFrontier } from './exploration/ExplorationFrontier.js';
+export { InteractionExecutor } from './tester/InteractionExecutor.js';
 
 // Types
 export type {
