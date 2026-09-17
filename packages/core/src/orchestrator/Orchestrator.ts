@@ -4,6 +4,9 @@ import { StructuredPerceiver } from '../perception/StructuredPerceiver.js';
 import { DatabaseManager } from '../db/Database.js';
 import { classifyComponent, type ComponentModel, type Component } from '../cognition/ComponentModel.js';
 import { InteractionExecutor } from '../tester/InteractionExecutor.js';
+import { BFSExplorer } from '../exploration/BFSExplorer.js';
+import { ScreenshotManager } from '../reporter/ScreenshotManager.js';
+import { ReportGenerator } from '../reporter/ReportGenerator.js';
 import { BUILTIN_RULES, type QualityRule, type RuleContext, type RuleResult } from '../cognition/QualityRule.js';
 import type { AgentConfig, TargetConfig } from '../config/types.js';
 import type { StructuredObservation } from '../perception/types.js';
@@ -113,12 +116,34 @@ export class Orchestrator {
       timeout: this.config.timeout.navigation,
     });
 
-    // Phase 2: Explore (perceive + build component model)
+    // Initialize screenshot manager
+    const screenshots = new ScreenshotManager(process.cwd(), session.id);
+    await screenshots.capture(page, 'initial', 'Initial page load');
+
+    // Phase 2: Explore (BFS navigation)
     session.phase = 'explore';
     this.updateSessionPhase(session);
 
+    console.log('  Starting BFS exploration...');
+    const explorer = new BFSExplorer(this.perceiver, this.db, target.name, {
+      maxPages: Math.min(target.strategy.maxPages, 20), // Limit for v0.1
+      maxDepth: 3,
+      excludePaths: target.scope.excludePaths,
+    });
+
+    const explorationResult = await explorer.explore(page, target.url);
+    console.log(`  Exploration complete: ${explorationResult.pagesVisited} pages, ${explorationResult.totalComponents} components`);
+
+    // Navigate back to start page for form testing
+    await page.goto(target.url, {
+      waitUntil: 'networkidle',
+      timeout: this.config.timeout.navigation,
+    });
+
     const observation = await this.perceiver.capture(page);
     session.componentModel = this.buildComponentModel(observation);
+
+    await screenshots.capture(page, 'after-explore', 'After BFS exploration');
 
     // Phase 3: Test (form interactions + quality rules)
     session.phase = 'test';
@@ -127,6 +152,8 @@ export class Orchestrator {
     // Test form interactions
     await this.testForms(page, observation, session);
 
+    await screenshots.capture(page, 'after-test', 'After form testing');
+
     const testResults = await this.runQualityRules(session, observation);
 
     // Phase 4: Report
@@ -134,6 +161,18 @@ export class Orchestrator {
     this.updateSessionPhase(session);
     session.status = 'completed';
     session.endedAt = Date.now();
+
+    // Generate report
+    try {
+      const reportDir = target.strategy.video
+        ? `${process.cwd()}/.wta/reports`
+        : `${process.cwd()}/.wta/reports`;
+      const reporter = new ReportGenerator(this.db, { outputDir: reportDir, format: 'md' });
+      const reportPath = reporter.save(session.id);
+      console.log(`  Report generated: ${reportPath}`);
+    } catch (error) {
+      console.warn(`  Report generation failed: ${error instanceof Error ? error.message : error}`);
+    }
 
     this.db.prepare(`
       UPDATE sessions SET status = 'completed', ended_at = ?, phase = 'report'
@@ -148,7 +187,13 @@ export class Orchestrator {
    * Build component model from structured observation.
    */
   private buildComponentModel(observation: StructuredObservation): ComponentModel {
-    const pageId = randomUUID();
+    // Check if page already exists (BFS explorer may have already persisted it)
+    const urlPattern = this.normalizeUrl(observation.url);
+    const existingPage = this.db.prepare(`
+      SELECT id FROM pages WHERE target_id = ? AND url_pattern = ?
+    `).get(this.currentTargetId, urlPattern) as { id: string } | undefined;
+
+    const pageId = existingPage?.id ?? randomUUID();
     const components: Component[] = [];
 
     for (const extracted of observation.components) {
@@ -176,13 +221,13 @@ export class Orchestrator {
 
     // Persist page to database
     this.db.prepare(`
-      INSERT OR REPLACE INTO pages (id, target_id, url_pattern, title, role, first_seen_at, last_visited_at, visit_count, test_status)
+      INSERT OR IGNORE INTO pages (id, target_id, url_pattern, title, role, first_seen_at, last_visited_at, visit_count, test_status)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'partial')
     `).run(pageId, this.currentTargetId, this.normalizeUrl(observation.url), observation.title, 'unknown', Date.now(), Date.now());
 
     // Persist components to database
     const insertComponent = this.db.prepare(`
-      INSERT OR REPLACE INTO components (id, target_id, page_id, type, selector, label, state_json, confidence, source, created_at, updated_at)
+      INSERT OR IGNORE INTO components (id, target_id, page_id, type, selector, label, state_json, confidence, source, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 

@@ -105,6 +105,16 @@ const EXTRACTION_SCRIPT = `(() => {
         if (el.getAttribute('role')) {
           return '[role="' + el.getAttribute('role') + '"]';
         }
+        // Text-based selector for links and buttons
+        const text = el.textContent?.trim().slice(0, 50);
+        if (text && ['a', 'button'].includes(el.tagName.toLowerCase())) {
+          const escaped = text.replace(/"/g, '\\\\\\"');
+          return el.tagName.toLowerCase() + ':has-text("' + escaped + '")';
+        }
+        // Class-based selector (first unique class)
+        const uniqueClass = Array.from(el.classList).find(c =>
+          document.querySelectorAll('.' + CSS.escape(c)).length === 1);
+        if (uniqueClass) return '.' + CSS.escape(uniqueClass);
         return null;
       })(),
     });

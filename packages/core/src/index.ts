@@ -6,6 +6,9 @@ export { LLMRouter } from './llm/LLMRouter.js';
 export { AgentSelfHealer } from './healing/AgentSelfHealer.js';
 export { ExplorationFrontier } from './exploration/ExplorationFrontier.js';
 export { InteractionExecutor } from './tester/InteractionExecutor.js';
+export { BFSExplorer } from './exploration/BFSExplorer.js';
+export { ScreenshotManager } from './reporter/ScreenshotManager.js';
+export { ReportGenerator } from './reporter/ReportGenerator.js';
 
 // Types
 export type {
