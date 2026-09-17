@@ -101,7 +101,8 @@ export class BFSExplorer {
         }
       }
 
-      console.log(`  [explorer] Visited ${result.pagesVisited}: ${normalizedUrl} (${pageLinks.length} links found, queue: ${this.queue.length})`);
+      result.totalComponents += observation.components.length;
+      console.log(`  [explorer] Visited ${result.pagesVisited}: ${normalizedUrl} (${pageLinks.length} links, ${observation.components.length} components, queue: ${this.queue.length})`);
     }
 
     result.newPagesDiscovered = result.pagesVisited;

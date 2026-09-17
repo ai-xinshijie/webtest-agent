@@ -162,22 +162,21 @@ export class Orchestrator {
     session.status = 'completed';
     session.endedAt = Date.now();
 
-    // Generate report
+    // Update session status first, then generate report
+    this.db.prepare(`
+      UPDATE sessions SET status = 'completed', ended_at = ?, phase = 'report'
+      WHERE id = ?
+    `).run(session.endedAt, session.id);
+
+    // Generate report (after status is updated)
     try {
-      const reportDir = target.strategy.video
-        ? `${process.cwd()}/.wta/reports`
-        : `${process.cwd()}/.wta/reports`;
+      const reportDir = `${process.cwd()}/.wta/reports`;
       const reporter = new ReportGenerator(this.db, { outputDir: reportDir, format: 'md' });
       const reportPath = reporter.save(session.id);
       console.log(`  Report generated: ${reportPath}`);
     } catch (error) {
       console.warn(`  Report generation failed: ${error instanceof Error ? error.message : error}`);
     }
-
-    this.db.prepare(`
-      UPDATE sessions SET status = 'completed', ended_at = ?, phase = 'report'
-      WHERE id = ?
-    `).run(session.endedAt, session.id);
 
     // Close context
     await this.browserManager.close();
