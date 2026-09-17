@@ -22,6 +22,7 @@ export interface Session {
 
 export class Orchestrator {
   private sessions: Map<string, Session> = new Map();
+  private currentTargetId: string = '';
   private browserManager: BrowserManager;
   private perceiver: StructuredPerceiver;
   private db: DatabaseManager;
@@ -44,6 +45,7 @@ export class Orchestrator {
     parallel?: number;
   } = {}): Promise<Session> {
     const sessionId = randomUUID();
+    this.currentTargetId = target.name;
 
     // Create session record
     const session: Session = {
@@ -56,6 +58,12 @@ export class Orchestrator {
     };
 
     this.sessions.set(sessionId, session);
+
+    // Ensure target exists in database
+    this.db.prepare(`
+      INSERT OR IGNORE INTO targets (id, name, url, config_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(target.name, target.name, target.url, JSON.stringify(target), Date.now(), Date.now());
 
     // Persist session
     this.db.prepare(`
@@ -160,6 +168,34 @@ export class Orchestrator {
       components.push(component);
     }
 
+    // Persist page to database
+    this.db.prepare(`
+      INSERT OR REPLACE INTO pages (id, target_id, url_pattern, title, role, first_seen_at, last_visited_at, visit_count, test_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'partial')
+    `).run(pageId, this.currentTargetId, this.normalizeUrl(observation.url), observation.title, 'unknown', Date.now(), Date.now());
+
+    // Persist components to database
+    const insertComponent = this.db.prepare(`
+      INSERT OR REPLACE INTO components (id, target_id, page_id, type, selector, label, state_json, confidence, source, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const component of components) {
+      insertComponent.run(
+        component.id,
+        this.currentTargetId,
+        pageId,
+        component.type,
+        component.selector,
+        component.label,
+        JSON.stringify(component.state),
+        component.meta.confidence,
+        component.meta.source,
+        Date.now(),
+        Date.now(),
+      );
+    }
+
     return {
       pages: [{
         id: pageId,
@@ -194,6 +230,11 @@ export class Orchestrator {
     const rules: QualityRule[] = BUILTIN_RULES;
 
     for (const rule of rules) {
+      // Skip action-dependent rules on initial page load (not a user action)
+      if (rule.id === 'QR001' || rule.id === 'QR002') {
+        continue; // These rules require a user action (before vs after), not page load
+      }
+
       const ctx: RuleContext = {
         before: observation,
         action: { type: 'page-load', target: observation.url },

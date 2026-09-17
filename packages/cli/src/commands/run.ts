@@ -26,25 +26,20 @@ export const runCommand = new Command('run')
     foreground?: boolean;
   }) => {
     const cwd = process.cwd();
-    const targetFile = path.join(cwd, '.wta', 'targets', `${targetName}.yaml`);
+    const jsonFile = path.join(cwd, '.wta', 'targets', `${targetName}.json`);
 
-    if (!existsSync(targetFile)) {
-      // Try JSON
-      const jsonFile = path.join(cwd, '.wta', 'targets', `${targetName}.json`);
-      if (!existsSync(jsonFile)) {
-        console.error(`Target not found: ${targetName}`);
-        console.error(`Expected: ${targetFile} or ${jsonFile}`);
-        process.exit(1);
-      }
+    if (!existsSync(jsonFile)) {
+      console.error(`Target not found: ${targetName}`);
+      console.error(`Expected: ${jsonFile}`);
+      process.exit(1);
     }
 
-    // Load target config
     let targetConfig: TargetConfig;
     try {
-      const raw = readFileSync(targetFile, 'utf-8');
+      const raw = readFileSync(jsonFile, 'utf-8');
       targetConfig = JSON.parse(raw) as TargetConfig;
     } catch {
-      console.error(`Failed to parse target config: ${targetFile}`);
+      console.error(`Failed to parse target config: ${jsonFile}`);
       process.exit(1);
     }
 
@@ -53,9 +48,7 @@ export const runCommand = new Command('run')
     console.log(`  Mode: ${options.mode}`);
     console.log(`  Phase: ${options.phase ?? 'all'}`);
 
-    // Dynamic import to avoid loading heavy deps for CLI help
     const { Orchestrator } = await import('@wta/core');
-
     const config = createDefaultConfig(cwd);
     const orchestrator = new Orchestrator(config);
 
