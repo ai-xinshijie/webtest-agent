@@ -1,5 +1,5 @@
 /**
- * Agent-level self-healing: error boundaries, loop detection, health monitoring.
+ * Agent 级自愈：错误边界、循环检测和健康恢复。
  */
 export class AgentSelfHealer {
   private loopDetector: LoopDetector;
@@ -10,8 +10,8 @@ export class AgentSelfHealer {
   }
 
   /**
-   * Execute an operation safely with error recovery.
-   */
+   * 带错误恢复能力地执行操作。
+  */
   async executeSafely<T>(
     operation: () => Promise<T>,
     context: { operationName: string; sessionId: string; retryCount?: number },
@@ -19,9 +19,9 @@ export class AgentSelfHealer {
     try {
       const result = await operation();
 
-      // Check for loop after successful action
+      // 成功执行后检查是否进入循环。
       if (this.loopDetector.onAction({ operation: context.operationName })) {
-        return { skipped: true, reason: 'loop detected, strategy changed' };
+        return { skipped: true, reason: '检测到重复动作循环，已切换测试策略' };
       }
 
       return result;
@@ -43,15 +43,15 @@ export class AgentSelfHealer {
         return this.retryWithBackoff(retry, 3, [1000, 3000, 5000]);
 
       case 'browser-crash':
-        console.warn(`Browser crashed during ${ctx.operationName}, needs restart`);
-        return { skipped: true, reason: `browser crash: ${err.message}` };
+        console.warn(`执行 ${ctx.operationName} 时浏览器崩溃，需要重启`);
+        return { skipped: true, reason: `浏览器崩溃：${err.message}` };
 
       case 'llm-malformed':
-        return { skipped: true, reason: `LLM output malformed: ${err.message}` };
+        return { skipped: true, reason: `模型输出格式错误：${err.message}` };
 
       case 'fatal':
       default:
-        console.error(`Fatal error in ${ctx.operationName}:`, err.message);
+        console.error(`执行 ${ctx.operationName} 时发生致命错误：`, err.message);
         return { skipped: true, reason: err.message };
     }
   }

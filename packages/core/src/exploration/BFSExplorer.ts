@@ -3,6 +3,7 @@ import type { StructuredObservation } from '../perception/types.js';
 import { classifyComponent, type ComponentModel, type PageNode, type Component } from '../cognition/ComponentModel.js';
 import type { DatabaseManager } from '../db/Database.js';
 import { randomUUID } from 'node:crypto';
+import type { AgentLogger } from '../logger/AgentLogger.js';
 
 export interface ExplorerOptions {
   maxPages: number;
@@ -29,6 +30,7 @@ export class BFSExplorer {
     private db: DatabaseManager,
     private targetId: string,
     private options: ExplorerOptions = { maxPages: 50, maxDepth: 3, excludePaths: [] },
+    private logger?: AgentLogger,
   ) {}
 
   /**
@@ -57,16 +59,57 @@ export class BFSExplorer {
 
       // Navigate to page
       try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await page.waitForTimeout(1000); // Wait for dynamic content
+        const navigate = () => page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        if (this.logger) {
+          await this.logger.runScript(
+          { description: `探索页面：${normalizedUrl}`, module: 'BFSExplorer', method: 'page.goto' },
+          { type: 'navigate', target: url, params: { depth, trigger } },
+            navigate,
+            { pageUrl: url, phase: 'explore' },
+          );
+        } else {
+          await navigate();
+        }
+        const waitForContent = () => page.waitForTimeout(1000);
+        if (this.logger) {
+          await this.logger.runScript(
+          { description: '等待动态内容加载', module: 'BFSExplorer', method: 'waitForTimeout' },
+          { type: 'wait', target: url, params: { timeout: 1000 } },
+            waitForContent,
+            { pageUrl: url, phase: 'explore' },
+          );
+        } else {
+          await waitForContent();
+        }
       } catch (error) {
         console.warn(`  [explorer] Failed to navigate to ${url}: ${error instanceof Error ? error.message : error}`);
+        this.logger?.logScript(
+          { description: `页面导航失败：${normalizedUrl}`, module: 'BFSExplorer', method: 'page.goto' },
+          { type: 'navigate', target: url, params: { depth, trigger } },
+          { status: 'warning', duration: 0, error: error instanceof Error ? error.message : String(error) },
+          { pageUrl: url, phase: 'explore' },
+        );
         continue;
       }
 
       // Capture and classify
-      const observation = await this.perceiver.capture(page);
+      const observation = await (
+        this.logger
+          ? this.logger.runScript(
+              { description: '结构化提取页面组件', module: 'StructuredPerceiver', method: 'capture' },
+              { type: 'perceive', target: url, params: { componentCountExpected: true } },
+              () => this.perceiver.capture(page),
+              { pageUrl: url, phase: 'explore' },
+            )
+          : this.perceiver.capture(page)
+      );
       const pageId = this.persistPage(observation, normalizedUrl);
+      this.logger?.logScript(
+        { description: '持久化页面组件模型', module: 'BFSExplorer', method: 'persistPage' },
+        { type: 'persist-model', target: normalizedUrl, params: { componentCount: observation.components.length } },
+        { status: 'success', duration: 0, output: { pageId } },
+        { pageUrl: normalizedUrl, phase: 'explore' },
+      );
       result.pagesVisited++;
 
       // Extract all links directly from the page (more reliable than component selectors)

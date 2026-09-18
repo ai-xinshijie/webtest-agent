@@ -7,7 +7,9 @@
   "scripts": {
     "build": "pnpm -r --filter './packages/*' run build",
     "dev": "pnpm -r --parallel --filter './packages/*' run dev",
-    "test": "pnpm -r --filter './packages/*' run test",
+    "test": "vitest run --coverage",
+    "test:strict": "vitest run --coverage --coverage.thresholds.lines=100 --coverage.thresholds.branches=100 --coverage.thresholds.functions=100 --coverage.thresholds.statements=100",
+    "test:watch": "vitest --coverage",
     "lint": "pnpm -r --filter './packages/*' run lint",
     "clean": "pnpm -r --filter './packages/*' run clean"
   },
@@ -15,6 +17,9 @@
     "node": ">=20.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "@vitest/coverage-v8": "^5.0.1",
+    "@vitest/ui": "^5.0.1",
+    "typescript": "^5.6.0",
+    "vitest": "^5.0.1"
   }
 }

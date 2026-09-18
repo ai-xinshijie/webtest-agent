@@ -145,6 +145,10 @@ GUI 技术形态：本地 Web 服务（`wta gui` 启动），浏览器打开 `ht
 | NFR-04 | 数据安全 | 凭证仅本地存储，报告不泄露敏感信息 |
 | NFR-05 | 断点恢复 | 任意阶段中断，恢复后不重测已完成项 |
 | NFR-06 | 报告质量 | Bug 报告含：复现步骤、预期/实际、截图、严重级别 |
+| NFR-07 | 测试覆盖 | 所有功能必须有对应测试用例，代码覆盖率目标 100%，CI 中统计并展示 |
+| NFR-08 | 中文输出 | 所有报告、注释、日志、错误信息均使用中文 |
+| NFR-09 | 完整交付 | 设计文档中的所有功能都必须实现，不允许标记"not implemented"或"TODO" |
+| NFR-10 | 日志模块 | 每一步操作记录详细日志：触发来源（脚本/模型）、触发方式、执行参数、执行结果、耗时；模型触发记录发送内容和响应内容；GUI 按时间线展示，默认简单显示可展开详情 |
 
 ---
 
@@ -217,6 +221,280 @@ GUI 技术形态：本地 Web 服务（`wta gui` 启动），浏览器打开 `ht
 | 进程管理 | 自研 daemon + IPC | Agent 后台运行、CLI attach |
 | 包管理 | pnpm monorepo | CLI/GUI/core 分包 |
 
+### 3.2.1 日志模块（Log Module）
+
+每一步操作都有结构化文字日志，记录触发来源、参数、结果和耗时。
+
+#### 日志数据结构
+
+```typescript
+interface AgentLog {
+  id: string;                      // 唯一 ID
+  sessionId: string;               // 所属会话
+  timestamp: number;               // 时间戳（毫秒）
+  sequence: number;                 // 序号（会话内递增）
+
+  // 触发来源
+  source: 'script' | 'model' | 'system' | 'user';
+  // script: 确定性脚本触发（规则匹配、导航、截图等）
+  // model:  LLM 推理触发（组件识别、质量判断、策略决策等）
+  // system: 系统事件（浏览器启动、数据库操作、错误恢复）
+  // user:   用户操作（CLI 命令、GUI 点击）
+
+  trigger: {
+    description: string;           // 触发描述（中文）
+    module: string;                // 触发模块名
+    method: string;                // 触发方法名
+  };
+
+  // 执行内容
+  action: {
+    type: string;                  // 操作类型 (navigate/click/fill/identify/check...)
+    target?: string;               // 操作目标（selector 或 URL）
+    params?: Record<string, any>;  // 参数
+  };
+
+  // 模型触发专用字段
+  model?: {
+    provider: string;              // openai / anthropic / ollama
+    model: string;                 // 模型名
+    taskType: string;              // 任务类型
+    inputTokens: number;           // 输入 token 数
+    outputTokens: number;          // 输出 token 数
+    request: {
+      messages: Array<{ role: string; content: string }>;
+    };
+    response: {
+      content: string;             // LLM 响应文本
+      parsed?: any;                // 解析后的结构化结果
+    };
+  };
+
+  // 结果
+  result: {
+    status: 'success' | 'failed' | 'skipped' | 'warning';
+    duration: number;              // 耗时（毫秒）
+    output?: any;                  // 执行输出
+    error?: string;               // 错误信息（中文）
+    screenshotId?: string;         // 关联截图 ID
+  };
+
+  // 上下文
+  context: {
+    pageUrl?: string;              // 当前页面 URL
+    phase: string;                 // 当前阶段
+    componentId?: string;           // 相关组件 ID
+  };
+}
+```
+
+#### 日志记录器实现
+
+```typescript
+class AgentLogger {
+  private logs: AgentLog[] = [];
+  private sequence = 0;
+  private db: DatabaseManager;
+  private sessionId: string;
+
+  /**
+   * 记录脚本触发的操作
+   */
+  logScript(
+    trigger: { description: string; module: string; method: string },
+    action: { type: string; target?: string; params?: any },
+    context: { pageUrl?: string; phase: string; componentId?: string },
+  ): void {
+    this.write({
+      source: 'script',
+      trigger,
+      action,
+      context,
+      result: { status: 'success', duration: 0 },
+    });
+  }
+
+  /**
+   * 记录脚本触发的操作（含结果）
+   */
+  async logScriptResult(
+    trigger: { description: string; module: string; method: string },
+    action: { type: string; target?: string; params?: any },
+    execution: () => Promise<any>,
+    context: { pageUrl?: string; phase: string; componentId?: string },
+  ): Promise<any> {
+    const start = Date.now();
+    let output: any;
+    let status: string = 'success';
+    let error: string | undefined;
+
+    try {
+      output = await execution();
+    } catch (e) {
+      status = 'failed';
+      error = e instanceof Error ? e.message : String(e);
+    }
+
+    const duration = Date.now() - start;
+
+    this.write({
+      source: 'script',
+      trigger,
+      action,
+      context,
+      result: { status, duration, output, error },
+    });
+
+    if (error) throw new Error(error);
+    return output;
+  }
+
+  /**
+   * 记录模型触发的操作（含 LLM 请求和响应）
+   */
+  async logModel(
+    trigger: { description: string; module: string; method: string },
+    modelCall: () => Promise<{ content: string; parsed?: any }>,
+    action: { type: string; target?: string; params?: any },
+    modelConfig: { provider: string; model: string; taskType: string },
+    context: { pageUrl?: string; phase: string; componentId?: string },
+  ): Promise<any> {
+    const start = Date.now();
+    let response: any;
+    let status: string = 'success';
+    let error: string | undefined;
+
+    try {
+      response = await modelCall();
+    } catch (e) {
+      status = 'failed';
+      error = e instanceof Error ? e.message : String(e);
+    }
+
+    const duration = Date.now() - start;
+
+    this.write({
+      source: 'model',
+      trigger,
+      action,
+      model: {
+        ...modelConfig,
+        inputTokens: estimateTokens(modelCall.toString()),
+        outputTokens: estimateTokens(response?.content ?? ''),
+        request: { messages: [] }, // 从 LLMRouter 获取
+        response: response,
+      },
+      context,
+      result: { status, duration, output: response?.parsed, error },
+    });
+
+    if (error) throw new Error(error);
+    return response;
+  }
+
+  /**
+   * 持久化到数据库
+   */
+  private write(log: Omit<AgentLog, 'id' | 'sessionId' | 'timestamp' | 'sequence'>): void {
+    const entry: AgentLog = {
+      id: randomUUID(),
+      sessionId: this.sessionId,
+      timestamp: Date.now(),
+      sequence: ++this.sequence,
+      ...log,
+    } as AgentLog;
+
+    this.logs.push(entry);
+
+    // 写入数据库
+    this.db.prepare(`
+      INSERT INTO agent_logs (id, session_id, timestamp, sequence, source, log_json)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(entry.id, entry.sessionId, entry.timestamp, entry.sequence, entry.source, JSON.stringify(entry));
+
+    // 控制台输出（简单格式）
+    const icon = entry.source === 'model' ? '🤖' : entry.source === 'script' ? '⚙️' : '📋';
+    const statusIcon = entry.result.status === 'success' ? '✓' : entry.result.status === 'failed' ? '✗' : '⏭';
+    console.log(
+      `  ${icon} [${entry.sequence}] ${statusIcon} ${entry.trigger.description} (${entry.result.duration}ms)`
+    );
+  }
+
+  /**
+   * 获取会话的完整时间线
+   */
+  getTimeline(): AgentLog[] {
+    return this.logs;
+  }
+
+  /**
+   * 获取模型的调用日志
+   */
+  getModelCalls(): AgentLog[] {
+    return this.logs.filter(l => l.source === 'model');
+  }
+}
+```
+
+#### GUI 时间线展示
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  执行时间线                                    [简单|详细] │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  ▶ 00:00:01  ⚙️ 启动浏览器                               │
+│    Chromium 无头模式启动成功 (234ms)                      │
+│                                                          │
+│  ▶ 00:00:02  ⚙️ 导航到目标页面                            │
+│    https://demoqa.com/text-box 加载完成 (1567ms)          │
+│                                                          │
+│  ▼ 00:00:04  🤖 识别页面组件                              │
+│    │ 模型: claude-sonnet-4                               │
+│    │ 输入: 47 个交互元素的结构化数据                       │
+│    │ 输出: 4 个 input, 2 个 textarea, 1 个 button       │
+│    │ 耗时: 892ms                                         │
+│    │ [展开请求详情] [展开响应详情]                          │
+│                                                          │
+│  ▶ 00:00:05  ⚙️ 截图: 初始页面                            │
+│    screenshot-001.png 保存成功 (45ms)                    │
+│                                                          │
+│  ▼ 00:00:06  ⚙️ 填充表单字段                              │
+│    │ 字段: Full Name → "测试用户"                         │
+│    │ 字段: Email → "test@example.com"                    │
+│    │ 耗时: 234ms                                         │
+│                                                          │
+│  ▶ 00:00:07  ⚙️ 提交表单                                  │
+│    点击提交按钮，等待响应 (1234ms)                         │
+│                                                          │
+│  ▼ 00:00:09  🤖 检查表单验证规则                          │
+│    │ 模型: o1                                           │
+│    │ 规则: QR002 (表单验证)                               │
+│    │ 判定: 通过 (置信度 0.95)                             │
+│    │ 耗时: 456ms                                         │
+│    │ [展开推理过程]                                       │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+
+简单模式: 只显示 ▶ 行（操作描述 + 耗时）
+详细模式: 展开 ▼ 行的完整参数、模型请求/响应、执行结果
+```
+
+#### 数据库表
+
+```sql
+CREATE TABLE IF NOT EXISTS agent_logs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  timestamp INTEGER NOT NULL,
+  sequence INTEGER NOT NULL,
+  source TEXT NOT NULL,           -- script | model | system | user
+  log_json TEXT NOT NULL,         -- 完整日志 JSON
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
+```
 ### 3.3 进程模型
 
 ```
@@ -4023,6 +4301,9 @@ webtest-agent/
 | SPA 路由变化 | 页面识别失败 | URL 模式化 + 组件指纹匹配 |
 | 组合爆炸 | 测试时间不可控 | 优先级排序 + 时间预算 + 断点恢复 |
 | LLM 输出不稳定 | 组件识别错误 | Zod schema 验证 + 重试 + 置信度阈值 |
+| 测试覆盖不足 | 隐蔽 bug 逃逸 | 强制 100% 覆盖率 CI 门禁，未达标不允许合并 |
+| 日志量过大 | 数据库膨胀 | 按天归档 + 压缩 + 会话结束后清理非关键日志 |
+| 中文描述不一致 | 用户体验差 | 统一使用 i18n 模块管理所有中文文案 |
 | 目标系统慢 | 超时频繁 | 自适应等待 + 可配置超时 |
 | 记忆膨胀 | 数据库过大 | 会话压缩 + 定期归档 + 截图文件清理 |
 | 误报 | 报告不可信 | 证据链要求 + 人工确认标记 + Bug 去重 |

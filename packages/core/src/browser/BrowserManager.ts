@@ -18,14 +18,14 @@ export class BrowserManager {
     private defaultBrowser: 'chromium' | 'firefox' | 'webkit' = 'chromium',
   ) {}
 
-  /** Check if bundled browser exists */
+  /** 检查内置浏览器是否存在。 */
   isBrowserAvailable(browserType?: string): boolean {
     const type = browserType ?? this.defaultBrowser;
     const browserPath = path.join(this.browserDir, type);
     return existsSync(browserPath);
   }
 
-  /** Launch browser pointing to vendor/browsers */
+  /** 启动内置目录中的浏览器。 */
   async launch(options: BrowserLaunchOptions = {}): Promise<Browser> {
     if (this.browser) return this.browser;
 
@@ -48,13 +48,13 @@ export class BrowserManager {
         this.browser = await webkit.launch(launchOptions);
         break;
       default:
-        throw new Error(`Unsupported browser: ${browserType}`);
+        throw new Error(`不支持的浏览器类型：${browserType}`);
     }
 
     return this.browser;
   }
 
-  /** Create an isolated browser context */
+  /** 创建隔离的浏览器上下文。 */
   async createContext(sessionId: string, options: BrowserLaunchOptions = {}): Promise<BrowserContext> {
     const browser = await this.launch(options);
 
@@ -69,20 +69,20 @@ export class BrowserManager {
     return context;
   }
 
-  /** Create a new page in a context */
+  /** 在指定上下文中创建页面。 */
   async createPage(sessionId: string): Promise<Page> {
     const context = this.contexts.get(sessionId);
-    if (!context) throw new Error(`No context found for session: ${sessionId}`);
+    if (!context) throw new Error(`未找到会话的浏览器上下文：${sessionId}`);
     return context.newPage();
   }
 
-  /** Restart browser (self-healing) */
+  /** 重启浏览器，用于测试级自愈。 */
   async restart(): Promise<Browser> {
     await this.close();
     return this.launch();
   }
 
-  /** Close all contexts and browser */
+  /** 关闭全部上下文和浏览器。 */
   async close(): Promise<void> {
     for (const [, context] of this.contexts) {
       await context.close().catch(() => {});
@@ -94,7 +94,7 @@ export class BrowserManager {
     }
   }
 
-  /** Check if browser is alive */
+  /** 检查浏览器是否存活。 */
   isAlive(): boolean {
     return this.browser !== null && this.browser.isConnected();
   }

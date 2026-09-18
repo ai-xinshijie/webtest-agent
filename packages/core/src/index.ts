@@ -9,6 +9,7 @@ export { InteractionExecutor } from './tester/InteractionExecutor.js';
 export { BFSExplorer } from './exploration/BFSExplorer.js';
 export { ScreenshotManager } from './reporter/ScreenshotManager.js';
 export { ReportGenerator } from './reporter/ReportGenerator.js';
+export { AgentLogger, estimateTokens } from './logger/AgentLogger.js';
 
 // Types
 export type {
@@ -21,4 +22,8 @@ export type { StructuredObservation, ExtractedComponent, NetworkEvent, Observati
 export type { QualityRule, RuleContext, RuleResult, RuleViolation } from './cognition/QualityRule.js';
 export { BUILTIN_RULES, QR001, QR002, QR006 } from './cognition/QualityRule.js';
 export type { AgentConfig, TargetConfig, ModelRouting } from './config/types.js';
+export type {
+  AgentLog, AgentLogInput, AgentLogSource, AgentLogStatus,
+  AgentLogTrigger, AgentLogAction, AgentLogModel, AgentLogResult, AgentLogContext,
+} from './logger/AgentLogger.js';
 export { createDefaultConfig } from './config/types.js';

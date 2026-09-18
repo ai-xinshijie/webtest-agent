@@ -1,29 +1,67 @@
 import type { Page } from 'playwright';
 import type { Component } from '../cognition/ComponentModel.js';
 import type { ExtractedComponent } from '../perception/types.js';
+import type { AgentLogger, AgentLogContext } from '../logger/AgentLogger.js';
+
+interface ExecutionOptions {
+  context: AgentLogContext;
+}
 
 /**
  * Execute interactions on page components (fill, click, select, etc.)
  */
 export class InteractionExecutor {
+  private logger?: AgentLogger;
+
+  /** 注入会话日志器。 */
+  setLogger(logger: AgentLogger): void {
+    this.logger = logger;
+  }
   /**
    * Fill a form field with a test value.
    */
-  async fill(page: Page, component: ExtractedComponent, value: string): Promise<void> {
+  async fill(
+    page: Page,
+    component: ExtractedComponent,
+    value: string,
+    options?: ExecutionOptions,
+  ): Promise<void> {
     const selector = this.getSelector(component);
-    if (!selector) throw new Error(`No selector for component: ${component.tag}`);
+    if (!selector) throw new Error(`组件没有可用选择器：${component.tag}`);
 
-    await page.fill(selector, value, { timeout: 5000 });
+    const execute = () => page.fill(selector, value, { timeout: 5000 });
+    if (!this.logger || !options) {
+      await execute();
+      return;
+    }
+
+    await this.logger.runScript(
+      { description: `填充字段：${this.getFieldName(component)}`, module: 'InteractionExecutor', method: 'fill' },
+      { type: 'fill', target: selector, params: { value } },
+      execute,
+      options.context,
+    );
   }
 
   /**
    * Click a component.
    */
-  async click(page: Page, component: ExtractedComponent): Promise<void> {
+  async click(page: Page, component: ExtractedComponent, options?: ExecutionOptions): Promise<void> {
     const selector = this.getSelector(component);
-    if (!selector) throw new Error(`No selector for component: ${component.tag}`);
+    if (!selector) throw new Error(`组件没有可用选择器：${component.tag}`);
 
-    await page.click(selector, { timeout: 5000 });
+    const execute = () => page.click(selector, { timeout: 5000 });
+    if (!this.logger || !options) {
+      await execute();
+      return;
+    }
+
+    await this.logger.runScript(
+      { description: `点击组件：${this.getFieldName(component)}`, module: 'InteractionExecutor', method: 'click' },
+      { type: 'click', target: selector, params: { tag: component.tag } },
+      execute,
+      options.context,
+    );
   }
 
   /**
@@ -43,6 +81,7 @@ export class InteractionExecutor {
     page: Page,
     fields: ExtractedComponent[],
     mode: 'valid' | 'empty' | 'invalid' | 'boundary' = 'valid',
+    options?: ExecutionOptions,
   ): Promise<Record<string, string>> {
     const filledValues: Record<string, string> = {};
 
@@ -51,7 +90,7 @@ export class InteractionExecutor {
 
       const testValue = this.generateTestValue(field, mode);
       if (testValue !== undefined) {
-        await this.fill(page, field, testValue);
+        await this.fill(page, field, testValue, options);
         filledValues[field.text || field.ariaLabel || field.placeholder || field.tag] = testValue;
       }
     }
@@ -62,10 +101,23 @@ export class InteractionExecutor {
   /**
    * Submit a form by clicking the submit button.
    */
-  async submitForm(page: Page, submitButton: ExtractedComponent): Promise<void> {
-    await this.click(page, submitButton);
-    // Wait for potential navigation or feedback
-    await page.waitForTimeout(1000);
+  async submitForm(
+    page: Page,
+    submitButton: ExtractedComponent,
+    options?: ExecutionOptions,
+  ): Promise<void> {
+    await this.click(page, submitButton, options);
+    // 等待表单提交后的页面反馈。
+    if (this.logger && options) {
+      await this.logger.runScript(
+        { description: '等待表单提交后的页面反馈', module: 'InteractionExecutor', method: 'waitForTimeout' },
+        { type: 'wait', params: { timeout: 1000, reason: 'form-feedback' } },
+        () => page.waitForTimeout(1000),
+        options.context,
+      );
+    } else {
+      await page.waitForTimeout(1000);
+    }
   }
 
   /**
@@ -86,7 +138,13 @@ export class InteractionExecutor {
     const placeholder = field.placeholder || '';
     const label = field.text || field.ariaLabel || field.placeholder || '';
 
-    if (type === 'email' || label.toLowerCase().includes('email') || placeholder.toLowerCase().includes('email')) {
+    if (
+      type === 'email' ||
+      label.toLowerCase().includes('email') ||
+      label.includes('邮箱') ||
+      placeholder.toLowerCase().includes('email') ||
+      placeholder.includes('邮箱')
+    ) {
       return 'test@example.com';
     }
     if (type === 'tel' || label.toLowerCase().includes('phone')) {
@@ -125,6 +183,10 @@ export class InteractionExecutor {
     return 'a'.repeat(1000);
   }
 
+  private getFieldName(component: ExtractedComponent): string {
+    return component.text || component.ariaLabel || component.placeholder || component.testId || component.tag;
+  }
+
   private isFormField(field: ExtractedComponent): boolean {
     return ['input', 'textarea', 'select'].includes(field.tag) ||
       field.role === 'textbox' || field.role === 'combobox';
@@ -136,6 +198,6 @@ export class InteractionExecutor {
     if (component.testId) return `[data-testid="${component.testId}"]`;
     if (component.ariaLabel) return `${component.tag}[aria-label="${component.ariaLabel}"]`;
     if (component.placeholder) return `${component.tag}[placeholder="${component.placeholder}"]`;
-    return component.tag;
+    return null;
   }
 }

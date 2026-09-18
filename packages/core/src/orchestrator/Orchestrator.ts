@@ -10,6 +10,7 @@ import { ReportGenerator } from '../reporter/ReportGenerator.js';
 import { BUILTIN_RULES, type QualityRule, type RuleContext, type RuleResult } from '../cognition/QualityRule.js';
 import type { AgentConfig, TargetConfig } from '../config/types.js';
 import type { StructuredObservation } from '../perception/types.js';
+import { AgentLogger } from '../logger/AgentLogger.js';
 import type { Page } from 'playwright';
 
 export interface Session {
@@ -22,6 +23,7 @@ export interface Session {
   currentPage?: Page;
   componentModel?: ComponentModel;
   restartCount: number;
+  logger?: AgentLogger;
 }
 
 export class Orchestrator {
@@ -77,10 +79,33 @@ export class Orchestrator {
       VALUES (?, ?, 'running', ?, 'login')
     `).run(sessionId, target.name, session.startedAt);
 
+    const logger = new AgentLogger(this.db, sessionId);
+    session.logger = logger;
+    logger.logUser(
+      { description: `启动测试会话：${target.name}`, module: 'Orchestrator', method: 'run' },
+      {
+        type: 'start-session',
+        target: target.name,
+        params: { runMode: options.runMode ?? 'continue', headless: options.headless ?? 'auto' },
+      },
+      { status: 'success', duration: 0, output: { sessionId } },
+      { phase: 'login' },
+    );
+
     // Run agent loop
     try {
       await this.agentLoop(session, target, options);
     } catch (error) {
+      logger.logSystem(
+        { description: '测试会话执行失败', module: 'Orchestrator', method: 'run' },
+        { type: 'session-error', target: sessionId },
+        {
+          status: 'failed',
+          duration: Date.now() - session.startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        { phase: session.phase },
+      );
       session.status = 'failed';
       this.db.prepare(`
         UPDATE sessions SET status = 'failed', ended_at = ?
@@ -101,24 +126,54 @@ export class Orchestrator {
     options: { runMode?: string; phase?: string; headless?: boolean }
   ): Promise<void> {
     const headless = options.headless ?? this.shouldHeadless();
+    const logger = session.logger;
+    if (!logger) throw new Error('会话日志器尚未初始化');
+    this.executor.setLogger(logger);
 
     // Phase 1: Launch browser and navigate
-    const context = await this.browserManager.createContext(session.id, {
-      headless,
-      viewport: this.config.viewport,
-    });
-    const page = await context.newPage();
+    const context = await logger.runScript(
+      { description: '创建浏览器上下文', module: 'BrowserManager', method: 'createContext' },
+      { type: 'create-context', params: { headless, viewport: this.config.viewport } },
+      () => this.browserManager.createContext(session.id, {
+        headless,
+        viewport: this.config.viewport,
+      }),
+      { phase: 'login' },
+    );
+    const page = await logger.runScript(
+      { description: '创建浏览器页面', module: 'BrowserManager', method: 'newPage' },
+      { type: 'new-page' },
+      () => context.newPage(),
+      { phase: 'login' },
+    );
     session.currentPage = page;
 
     // Navigate to target
-    await page.goto(target.url, {
-      waitUntil: 'networkidle',
-      timeout: this.config.timeout.navigation,
-    });
+    await logger.runScript(
+      { description: '导航到目标页面', module: 'Orchestrator', method: 'page.goto' },
+      { type: 'navigate', target: target.url, params: { waitUntil: 'networkidle' } },
+      () => page.goto(target.url, {
+        waitUntil: 'networkidle',
+        timeout: this.config.timeout.navigation,
+      }),
+      { pageUrl: target.url, phase: 'login' },
+    );
 
     // Initialize screenshot manager
     const screenshots = new ScreenshotManager(process.cwd(), session.id);
-    await screenshots.capture(page, 'initial', 'Initial page load');
+    const initialScreenshot = await screenshots.capture(page, 'initial', '初始页面加载完成');
+    logger.logScript(
+      { description: '截取初始页面截图', module: 'ScreenshotManager', method: 'capture' },
+      { type: 'screenshot', target: target.url, params: { phase: 'initial' } },
+      {
+        status: initialScreenshot ? 'success' : 'warning',
+        duration: 0,
+        output: initialScreenshot?.filePath,
+        screenshotId: initialScreenshot?.id,
+        error: initialScreenshot ? undefined : '截图失败',
+      },
+      { pageUrl: target.url, phase: 'login' },
+    );
 
     // Phase 2: Explore (BFS navigation)
     session.phase = 'explore';
@@ -129,21 +184,53 @@ export class Orchestrator {
       maxPages: Math.min(target.strategy.maxPages, 20), // Limit for v0.1
       maxDepth: 3,
       excludePaths: target.scope.excludePaths,
-    });
+    }, logger);
 
     const explorationResult = await explorer.explore(page, target.url);
     console.log(`  Exploration complete: ${explorationResult.pagesVisited} pages, ${explorationResult.totalComponents} components`);
+    logger.logScript(
+      { description: '广度优先探索完成', module: 'BFSExplorer', method: 'explore' },
+      {
+        type: 'explore-complete',
+        target: target.url,
+        params: { pagesVisited: explorationResult.pagesVisited, totalComponents: explorationResult.totalComponents },
+      },
+      { status: 'success', duration: 0, output: explorationResult },
+      { pageUrl: target.url, phase: 'explore' },
+    );
 
     // Navigate back to start page for form testing
-    await page.goto(target.url, {
-      waitUntil: 'networkidle',
-      timeout: this.config.timeout.navigation,
-    });
+    await logger.runScript(
+      { description: '返回起始页面执行功能测试', module: 'Orchestrator', method: 'page.goto' },
+      { type: 'navigate', target: target.url, params: { reason: 'form-test' } },
+      () => page.goto(target.url, {
+        waitUntil: 'networkidle',
+        timeout: this.config.timeout.navigation,
+      }),
+      { pageUrl: target.url, phase: 'test' },
+    );
 
-    const observation = await this.perceiver.capture(page);
+    const observation = await logger.runScript(
+      { description: '结构化提取当前页面组件', module: 'StructuredPerceiver', method: 'capture' },
+      { type: 'perceive', target: page.url(), params: { mode: 'form-test' } },
+      () => this.perceiver.capture(page),
+      { pageUrl: page.url(), phase: 'test' },
+    );
     session.componentModel = this.buildComponentModel(observation);
 
-    await screenshots.capture(page, 'after-explore', 'After BFS exploration');
+    const afterExploreScreenshot = await screenshots.capture(page, 'after-explore', '探索完成后的页面');
+    logger.logScript(
+      { description: '截取探索完成后的页面截图', module: 'ScreenshotManager', method: 'capture' },
+      { type: 'screenshot', target: page.url(), params: { phase: 'after-explore' } },
+      {
+        status: afterExploreScreenshot ? 'success' : 'warning',
+        duration: 0,
+        output: afterExploreScreenshot?.filePath,
+        screenshotId: afterExploreScreenshot?.id,
+        error: afterExploreScreenshot ? undefined : '截图失败',
+      },
+      { pageUrl: page.url(), phase: 'test' },
+    );
 
     // Phase 3: Test (form interactions + quality rules)
     session.phase = 'test';
@@ -152,7 +239,19 @@ export class Orchestrator {
     // Test form interactions
     await this.testForms(page, observation, session);
 
-    await screenshots.capture(page, 'after-test', 'After form testing');
+    const afterTestScreenshot = await screenshots.capture(page, 'after-test', '功能测试完成后的页面');
+    logger.logScript(
+      { description: '截取功能测试完成后的页面截图', module: 'ScreenshotManager', method: 'capture' },
+      { type: 'screenshot', target: page.url(), params: { phase: 'after-test' } },
+      {
+        status: afterTestScreenshot ? 'success' : 'warning',
+        duration: 0,
+        output: afterTestScreenshot?.filePath,
+        screenshotId: afterTestScreenshot?.id,
+        error: afterTestScreenshot ? undefined : '截图失败',
+      },
+      { pageUrl: page.url(), phase: 'test' },
+    );
 
     const testResults = await this.runQualityRules(session, observation);
 
@@ -172,14 +271,36 @@ export class Orchestrator {
     try {
       const reportDir = `${process.cwd()}/.wta/reports`;
       const reporter = new ReportGenerator(this.db, { outputDir: reportDir, format: 'md' });
-      const reportPath = reporter.save(session.id);
+      const reportPath = await logger.runScript(
+        { description: '生成中文测试报告', module: 'ReportGenerator', method: 'save' },
+        { type: 'generate-report', target: session.id, params: { format: 'md' } },
+        () => Promise.resolve(reporter.save(session.id)),
+        { phase: 'report' },
+      );
       console.log(`  Report generated: ${reportPath}`);
     } catch (error) {
+      logger.logScript(
+        { description: '生成测试报告失败', module: 'ReportGenerator', method: 'save' },
+        { type: 'generate-report', target: session.id, params: { format: 'md' } },
+        { status: 'failed', duration: 0, error: error instanceof Error ? error.message : String(error) },
+        { phase: 'report' },
+      );
       console.warn(`  Report generation failed: ${error instanceof Error ? error.message : error}`);
     }
 
     // Close context
-    await this.browserManager.close();
+    await logger.runScript(
+      { description: '关闭浏览器', module: 'BrowserManager', method: 'close' },
+      { type: 'close-browser', target: session.id },
+      () => this.browserManager.close(),
+      { phase: 'report' },
+    );
+    logger.logSystem(
+      { description: '测试会话完成', module: 'Orchestrator', method: 'agentLoop' },
+      { type: 'complete-session', target: session.id },
+      { status: 'success', duration: session.endedAt! - session.startedAt, output: { sessionId: session.id } },
+      { phase: 'report' },
+    );
   }
 
   /**
@@ -283,6 +404,12 @@ export class Orchestrator {
 
     if (formFields.length === 0) {
       console.log('  No form fields found, skipping form test');
+      session.logger?.logScript(
+        { description: '当前页面未发现表单字段，跳过表单测试', module: 'Orchestrator', method: 'testForms' },
+        { type: 'form-test', target: observation.url, params: { skipped: true } },
+        { status: 'skipped', duration: 0 },
+        { pageUrl: observation.url, phase: 'test' },
+      );
       return;
     }
 
@@ -290,16 +417,27 @@ export class Orchestrator {
 
     // Test 1: Fill with valid data
     try {
-      const filledValues = await this.executor.fillForm(page, formFields, 'valid');
+      const startedAt = Date.now();
+      const formContext = { pageUrl: observation.url, phase: 'test' };
+      const filledValues = await this.executor.fillForm(page, formFields, 'valid', { context: formContext });
       console.log(`  Filled ${Object.keys(filledValues).length} fields with valid data`);
 
       // Test 2: Submit if there's a submit button
       if (submitButtons.length > 0) {
-        await this.executor.submitForm(page, submitButtons[0]);
+        await this.executor.submitForm(page, submitButtons[0], { context: formContext });
         console.log('  Submitted form');
 
         // Check for validation or success feedback
-        const afterSubmit = await this.perceiver.capture(page);
+        const afterSubmit = await (
+          session.logger
+            ? session.logger.runScript(
+                { description: '结构化提取表单提交后的页面状态', module: 'StructuredPerceiver', method: 'capture' },
+                { type: 'perceive', target: observation.url, params: { reason: 'form-after-submit' } },
+                () => this.perceiver.capture(page),
+                { pageUrl: page.url(), phase: 'test' },
+              )
+            : this.perceiver.capture(page)
+        );
         const hasValidation = afterSubmit.components.some(c =>
           c.validationMessage ||
           c.classes.some(cls => cls.includes('error') || cls.includes('invalid')));
@@ -322,11 +460,17 @@ export class Orchestrator {
           JSON.stringify(filledValues),
           JSON.stringify({ validation: hasValidation }),
           Date.now(),
-          1000,
+          Date.now() - startedAt,
         );
       }
     } catch (error) {
       console.error('  Form test error:', error instanceof Error ? error.message : error);
+      session.logger?.logScript(
+        { description: '表单测试失败', module: 'Orchestrator', method: 'testForms' },
+        { type: 'form-test', target: observation.url, params: { fieldCount: formFields.length } },
+        { status: 'failed', duration: 0, error: error instanceof Error ? error.message : String(error) },
+        { pageUrl: observation.url, phase: 'test' },
+      );
     }
   }
 
@@ -343,6 +487,12 @@ export class Orchestrator {
     for (const rule of rules) {
       // Skip action-dependent rules on initial page load (not a user action)
       if (rule.id === 'QR001' || rule.id === 'QR002') {
+        session.logger?.logScript(
+          { description: `跳过需要操作前后的质量规则：${rule.id}`, module: 'Orchestrator', method: 'runQualityRules' },
+          { type: 'quality-rule', target: rule.id, params: { ruleName: rule.name } },
+          { status: 'skipped', duration: 0, output: { reason: '规则需要操作前后状态对比' } },
+          { pageUrl: observation.url, phase: 'test' },
+        );
         continue; // These rules require a user action (before vs after), not page load
       }
 
@@ -357,7 +507,16 @@ export class Orchestrator {
       };
 
       try {
-        const result = await rule.check(ctx);
+        const result = await (
+          session.logger
+            ? session.logger.runScript(
+                { description: `执行质量规则：${rule.name}`, module: 'QualityRule', method: 'check' },
+                { type: 'quality-rule', target: rule.id, params: { ruleName: rule.name, severity: rule.severity } },
+                () => rule.check(ctx),
+                { pageUrl: observation.url, phase: 'test' },
+              )
+            : rule.check(ctx)
+        );
         results.push(result);
 
         // Persist violations as bugs
@@ -380,6 +539,12 @@ export class Orchestrator {
       } catch (error) {
         // Rule check itself failed, log but don't stop
         console.error(`Rule ${rule.id} check failed:`, error);
+        session.logger?.logScript(
+          { description: `质量规则执行失败：${rule.id}`, module: 'QualityRule', method: 'check' },
+          { type: 'quality-rule', target: rule.id, params: { ruleName: rule.name } },
+          { status: 'failed', duration: 0, error: error instanceof Error ? error.message : String(error) },
+          { pageUrl: observation.url, phase: 'test' },
+        );
       }
     }
 
@@ -421,7 +586,7 @@ export class Orchestrator {
    */
   async stop(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (!session) throw new Error(`未找到测试会话：${sessionId}`);
 
     session.status = 'completed';
     session.endedAt = Date.now();

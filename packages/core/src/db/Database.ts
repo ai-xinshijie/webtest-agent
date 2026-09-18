@@ -188,12 +188,24 @@ CREATE TABLE IF NOT EXISTS evidence_files (
   created_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS agent_logs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  timestamp INTEGER NOT NULL,
+  sequence INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  log_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_components_page ON components(page_id);
 CREATE INDEX IF NOT EXISTS idx_components_target ON components(target_id);
 CREATE INDEX IF NOT EXISTS idx_test_results_session ON test_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_session ON bugs(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_target ON bugs(target_id);
 CREATE INDEX IF NOT EXISTS idx_memory_tested ON memory_tested_items(target_id);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
 `;
 
 export class DatabaseManager {
