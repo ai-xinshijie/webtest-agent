@@ -10,8 +10,31 @@ export { BFSExplorer } from './exploration/BFSExplorer.js';
 export { ScreenshotManager } from './reporter/ScreenshotManager.js';
 export { ReportGenerator } from './reporter/ReportGenerator.js';
 export { AgentLogger, estimateTokens } from './logger/AgentLogger.js';
+export { MemoryManager } from './memory/MemoryManager.js';
+export {
+  CoveringArrayGenerator,
+  CoverageTracker,
+  PathCoverageGenerator,
+} from './coverage/CoverageGuarantee.js';
+export { ComponentRevealer } from './exploration/ComponentRevealer.js';
+export { AuthSessionManager } from './auth/AuthSessionManager.js';
+export { NetworkFaultInjector } from './testing/NetworkFaultInjector.js';
+export { PluginManager } from './plugin/PluginManager.js';
+export { MCPClient } from './plugin/MCPClient.js';
 
 // Types
+export type {
+  MemoryExport, MemoryOverview, MemoryPattern, MemoryRule,
+  SessionSummary, TestedItem,
+} from './memory/MemoryManager.js';
+export type {
+  CoveringArrayResult, CoverageSnapshot, FactorValue, PathGraph,
+} from './coverage/CoverageGuarantee.js';
+export type { RevealResult } from './exploration/ComponentRevealer.js';
+export type { LoginResult } from './auth/AuthSessionManager.js';
+export type { NetworkFault, NetworkFaultType } from './testing/NetworkFaultInjector.js';
+export type { MCPTool } from './plugin/MCPClient.js';
+export type { PluginTool, WtaPlugin, WtaPluginContext } from './plugin/PluginManager.js';
 export type {
   ComponentType, PageRole, PageNode, Component,
   ComponentState, Constraint, Interaction, ActionType,
@@ -27,3 +50,4 @@ export type {
   AgentLogTrigger, AgentLogAction, AgentLogModel, AgentLogResult, AgentLogContext,
 } from './logger/AgentLogger.js';
 export { createDefaultConfig } from './config/types.js';
+export { ConfigManager } from './config/ConfigManager.js';

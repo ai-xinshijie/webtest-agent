@@ -31,6 +31,8 @@ export class LLMRouter {
         return this.callAnthropic(config, messages);
       case 'ollama':
         return this.callOllama(config, messages);
+      case 'custom':
+        return this.callCustom(config, messages);
       default:
         throw new Error(`不支持的模型提供方：${config.provider}`);
     }
@@ -165,5 +167,33 @@ export class LLMRouter {
 
     const data = await response.json() as any;
     return data.message?.content ?? '';
+  }
+
+  private async callCustom(
+    config: { model: string; baseUrl?: string; apiKey?: string; temperature: number; maxTokens: number },
+    messages: ChatMessage[],
+  ): Promise<string> {
+    if (!config.baseUrl) throw new Error('自定义模型必须配置 baseUrl');
+
+    const response = await fetch(config.baseUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        temperature: config.temperature,
+        max_tokens: config.maxTokens,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`自定义模型请求失败：${response.status} ${await response.text()}`);
+    }
+
+    const data = await response.json() as any;
+    return data.choices?.[0]?.message?.content ?? data.content?.[0]?.text ?? '';
   }
 }

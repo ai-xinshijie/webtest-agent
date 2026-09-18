@@ -1,18 +1,33 @@
 import { Command } from 'commander';
-import { writeFileSync, readFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { TargetConfig } from '@wta/core';
+
+const STRATEGIES = ['quick', 'standard', 'deep'] as const;
+
+function targetsDir(): string {
+  return path.join(process.cwd(), '.wta', 'targets');
+}
+
+function parseStrategy(value: string | undefined): typeof STRATEGIES[number] {
+  const strategy = value ?? 'deep';
+  if (!STRATEGIES.includes(strategy as typeof STRATEGIES[number])) {
+    throw new Error(`无效测试深度：${strategy}，可选值：${STRATEGIES.join('、')}`);
+  }
+  return strategy as typeof STRATEGIES[number];
+}
 
 export const targetCommand = new Command('target')
-  .description('Manage test targets');
+  .description('管理测试目标');
 
 targetCommand
   .command('add')
-  .description('Add a new test target')
-  .requiredOption('--name <name>', 'target name')
-  .requiredOption('--url <url>', 'target URL')
-  .requiredOption('--username <username>', 'login username')
-  .requiredOption('--password <password>', 'login password')
-  .option('--strategy <strategy>', 'test strategy: quick|standard|deep', 'deep')
+  .description('添加测试目标')
+  .requiredOption('--name <name>', '测试目标名称')
+  .requiredOption('--url <url>', '测试目标地址')
+  .requiredOption('--username <username>', '登录用户名')
+  .requiredOption('--password <password>', '登录密码')
+  .option('--strategy <strategy>', '测试深度：quick、standard、deep', 'deep')
   .action((options: {
     name: string;
     url: string;
@@ -20,21 +35,17 @@ targetCommand
     password: string;
     strategy?: string;
   }) => {
-    const cwd = process.cwd();
-    const targetsDir = path.join(cwd, '.wta', 'targets');
-
-    if (!existsSync(targetsDir)) {
-      console.error('Project not initialized. Run: wta init');
-      process.exit(1);
+    const directory = targetsDir();
+    if (!existsSync(directory)) {
+      throw new Error('项目尚未初始化，请先执行：wta init');
     }
 
-    const targetFile = path.join(targetsDir, `${options.name}.json`);
-    if (existsSync(targetFile)) {
-      console.error(`Target already exists: ${options.name}`);
-      process.exit(1);
+    const file = path.join(directory, `${options.name}.json`);
+    if (existsSync(file)) {
+      throw new Error(`测试目标已存在：${options.name}`);
     }
 
-    const targetConfig = {
+    const target: TargetConfig = {
       name: options.name,
       url: options.url,
       credentials: {
@@ -43,9 +54,9 @@ targetCommand
       },
       strategy: {
         runMode: 'continue',
-        depth: options.strategy ?? 'deep',
+        depth: parseStrategy(options.strategy),
         maxDuration: 86400,
-        maxPages: 200,
+        maxPages: options.strategy === 'quick' ? 50 : options.strategy === 'standard' ? 120 : 300,
         parallel: 1,
         screenshot: 'always',
         video: true,
@@ -57,48 +68,54 @@ targetCommand
       },
     };
 
-    writeFileSync(targetFile, JSON.stringify(targetConfig, null, 2));
-    console.log(`Target added: ${options.name}`);
-    console.log(`  URL: ${options.url}`);
-    console.log(`  File: ${targetFile}`);
+    writeFileSync(file, JSON.stringify(target, null, 2), 'utf-8');
+    console.log(`测试目标已添加：${options.name}`);
+    console.log(`  地址：${options.url}`);
+    console.log(`  文件：${file}`);
   });
 
 targetCommand
   .command('list')
-  .description('List all targets')
+  .description('列出全部测试目标')
   .action(() => {
-    const cwd = process.cwd();
-    const targetsDir = path.join(cwd, '.wta', 'targets');
-
-    if (!existsSync(targetsDir)) {
-      console.log('No targets. Run: wta target add');
+    const directory = targetsDir();
+    if (!existsSync(directory)) {
+      console.log('项目尚未初始化，请先执行：wta init');
       return;
     }
 
-    const files = readdirSync(targetsDir).filter(f => f.endsWith('.json'));
+    const files = readdirSync(directory).filter(file => file.endsWith('.json'));
     if (files.length === 0) {
-      console.log('No targets found.');
+      console.log('当前没有测试目标');
       return;
     }
 
-    console.log('\nTargets:\n');
+    console.log('测试目标：');
     for (const file of files) {
-      const content = JSON.parse(readFileSync(path.join(targetsDir, file), 'utf-8'));
-      console.log(`  ${content.name.padEnd(20)} ${content.url}`);
+      const target = JSON.parse(readFileSync(path.join(directory, file), 'utf-8')) as TargetConfig;
+      console.log(`  ${target.name.padEnd(20)} ${target.url}`);
     }
   });
 
 targetCommand
-  .command('remove <name>')
-  .description('Remove a target')
+  .command('show <name>')
+  .description('查看测试目标详情')
   .action((name: string) => {
-    const cwd = process.cwd();
-    const targetFile = path.join(cwd, '.wta', 'targets', `${name}.json`);
-    if (!existsSync(targetFile)) {
-      console.error(`Target not found: ${name}`);
-      process.exit(1);
+    const file = path.join(targetsDir(), `${name}.json`);
+    if (!existsSync(file)) {
+      throw new Error(`未找到测试目标：${name}`);
     }
-    const { unlinkSync } = require('node:fs');
-    unlinkSync(targetFile);
-    console.log(`Target removed: ${name}`);
+    console.log(readFileSync(file, 'utf-8'));
+  });
+
+targetCommand
+  .command('remove <name>')
+  .description('移除测试目标')
+  .action((name: string) => {
+    const file = path.join(targetsDir(), `${name}.json`);
+    if (!existsSync(file)) {
+      throw new Error(`未找到测试目标：${name}`);
+    }
+    unlinkSync(file);
+    console.log(`测试目标已移除：${name}`);
   });

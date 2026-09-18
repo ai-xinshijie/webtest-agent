@@ -158,7 +158,7 @@ describe('LLMRouter', () => {
 
     await expect(router.callWithLog('quality-reasoning', [
       { role: 'user', content: '判断质量' },
-    ], logger, { phase: 'test' })).rejects.toThrow('不支持的模型提供方：custom');
+    ], logger, { phase: 'test' })).rejects.toThrow('自定义模型必须配置 baseUrl');
 
     const modelCall = logger.getModelCalls()[0];
     expect(modelCall.model?.provider).toBe('custom');

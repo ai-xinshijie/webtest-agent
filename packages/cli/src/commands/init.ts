@@ -1,57 +1,39 @@
 import { Command } from 'commander';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import { ConfigManager, createDefaultConfig } from '@wta/core';
 
 export const initCommand = new Command('init')
-  .description('Initialize WebTestAgent project')
-  .argument('[path]', 'project directory', '.')
+  .description('初始化 WebTestAgent 项目')
+  .argument('[path]', '项目目录', '.')
   .action((targetPath: string) => {
     const root = path.resolve(targetPath);
     const wtaDir = path.join(root, '.wta');
 
     if (existsSync(wtaDir)) {
-      console.log('Project already initialized at', wtaDir);
+      console.log(`项目已初始化：${wtaDir}`);
       return;
     }
 
-    // Create directory structure
-    mkdirSync(wtaDir, { recursive: true });
     mkdirSync(path.join(wtaDir, 'targets'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'plugins'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'sessions'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'reports'), { recursive: true });
+    mkdirSync(path.join(wtaDir, 'screenshots'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'videos'), { recursive: true });
 
-    // Create default config
-    const config = {
-      browser: {
-        default: 'chromium',
-        headless: 'auto',
-        viewport: { width: 1920, height: 1080 },
-        parallel: 1,
-      },
-      timeout: {
-        navigation: 30000,
-        action: 10000,
-        screenshot: 5000,
-      },
-      logLevel: 'info',
-    };
+    new ConfigManager(root).save(createDefaultConfig(root));
 
-    writeFileSync(
-      path.join(wtaDir, 'config.json'),
-      JSON.stringify(config, null, 2),
-    );
-
-    console.log('Initialized WebTestAgent project at', root);
-    console.log('  .wta/config.json       - Agent configuration');
-    console.log('  .wta/targets/          - Test target configs');
-    console.log('  .wta/plugins/          - Plugin directory');
-    console.log('  .wta/sessions/         - Session data');
-    console.log('  .wta/reports/          - Test reports');
+    console.log(`WebTestAgent 项目已初始化：${root}`);
+    console.log('  .wta/config.json       全局配置');
+    console.log('  .wta/targets/          测试目标');
+    console.log('  .wta/plugins/          本地插件');
+    console.log('  .wta/sessions/         会话与登录状态');
+    console.log('  .wta/reports/          测试报告');
+    console.log('  .wta/screenshots/      测试截图');
     console.log('');
-    console.log('Next steps:');
-    console.log('  wta target add         - Add a test target');
-    console.log('  wta run <target>       - Run tests');
-    console.log('  wta doctor            - Check environment');
+    console.log('后续步骤：');
+    console.log('  wta target add --name demo --url https://demoqa.com --username test --password test');
+    console.log('  wta run demo');
+    console.log('  wta gui');
   });

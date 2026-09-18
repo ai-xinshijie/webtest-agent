@@ -5,8 +5,8 @@
   "description": "Autonomous Web UI testing agent with self-healing and memory",
   "license": "MIT",
   "scripts": {
-    "build": "pnpm -r --filter './packages/*' run build",
-    "dev": "pnpm -r --parallel --filter './packages/*' run dev",
+    "build": "pnpm -r run build",
+    "dev": "pnpm -r --parallel run dev",
     "test": "vitest run --coverage",
     "test:strict": "vitest run --coverage --coverage.thresholds.lines=100 --coverage.thresholds.branches=100 --coverage.thresholds.functions=100 --coverage.thresholds.statements=100",
     "test:watch": "vitest --coverage",

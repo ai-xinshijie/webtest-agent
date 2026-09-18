@@ -75,6 +75,98 @@ export class InteractionExecutor {
   }
 
   /**
+   * 按动作类型执行组件测试动作。
+   */
+  async executeAction(
+    page: Page,
+    component: ExtractedComponent,
+    action: string,
+    options?: ExecutionOptions,
+  ): Promise<Record<string, unknown>> {
+    const selector = this.getSelector(component);
+    if (!selector) throw new Error(`组件没有可用选择器：${component.tag}`);
+
+    const execute = async () => {
+      const clickOptions = { timeout: 5000 };
+      switch (action) {
+        case 'click':
+        case 'open':
+        case 'expand':
+        case 'switch':
+        case 'row-click':
+        case 'next':
+        case 'prev':
+        case 'first':
+        case 'last':
+        case 'sort':
+        case 'filter':
+          await page.click(selector, clickOptions);
+          break;
+        case 'double-click':
+          await page.dblclick(selector, clickOptions);
+          break;
+        case 'right-click':
+          await page.click(selector, { ...clickOptions, button: 'right' });
+          break;
+        case 'fill':
+        case 'fill-max':
+        case 'fill-invalid':
+          await page.fill(selector, this.getTestValue(component, action), { timeout: 5000 });
+          break;
+        case 'clear':
+          await page.fill(selector, '', { timeout: 5000 });
+          break;
+        case 'check':
+          await page.check(selector, { timeout: 5000 });
+          break;
+        case 'uncheck':
+          await page.uncheck(selector, { timeout: 5000 });
+          break;
+        case 'select':
+        case 'select-first':
+          await page.selectOption(selector, { index: 0 }, { timeout: 5000 });
+          break;
+        case 'select-last':
+          const optionCount = await page.locator(selector).locator('option').count();
+          await page.selectOption(selector, { index: Math.max(0, optionCount - 1) }, { timeout: 5000 });
+          break;
+        case 'select-random':
+          const randomCount = await page.locator(selector).locator('option').count();
+          const randomIndex = randomCount > 1 ? Math.floor(Math.random() * randomCount) : 0;
+          await page.selectOption(selector, { index: randomIndex }, { timeout: 5000 });
+          break;
+        case 'collapse':
+        case 'close-button':
+          await page.click(selector, clickOptions);
+          break;
+        case 'close-esc':
+          await page.keyboard.press('Escape');
+          break;
+        case 'close-overlay':
+          await page.mouse.click(2, 2);
+          break;
+        case 'submit-empty':
+        case 'submit-partial':
+        case 'submit-valid':
+          await this.submitForm(page, component, options);
+          break;
+        default:
+          throw new Error(`不支持的测试动作：${action}`);
+      }
+      await page.waitForTimeout(150);
+      return { action, selector };
+    };
+
+    if (!this.logger || !options) return await execute();
+    return this.logger.runScript(
+      { description: `执行动作：${action}`, module: 'InteractionExecutor', method: 'executeAction' },
+      { type: action, target: selector, params: { component: this.getFieldName(component) } },
+      execute,
+      options.context,
+    );
+  }
+
+  /**
    * Fill a form with test data based on field type.
    */
   async fillForm(
@@ -199,5 +291,10 @@ export class InteractionExecutor {
     if (component.ariaLabel) return `${component.tag}[aria-label="${component.ariaLabel}"]`;
     if (component.placeholder) return `${component.tag}[placeholder="${component.placeholder}"]`;
     return null;
+  }
+  private getTestValue(component: ExtractedComponent, action: string): string {
+    if (action === 'fill-max') return this.getBoundaryValue(component);
+    if (action === 'fill-invalid') return this.getInvalidValue(component);
+    return this.getValidValue(component);
   }
 }

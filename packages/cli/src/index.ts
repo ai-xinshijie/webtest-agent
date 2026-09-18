@@ -5,6 +5,13 @@ import { doctorCommand } from './commands/doctor.js';
 import { targetCommand } from './commands/target.js';
 import { reportCommand } from './commands/report.js';
 import { installCommand } from './commands/install.js';
+import { daemonCommand, guiCommand } from './commands/daemon.js';
+import { attachCommand } from './commands/attach.js';
+import { memoryCommand } from './commands/memory.js';
+import { pluginCommand } from './commands/plugin.js';
+import { configCommand } from './commands/config.js';
+import { modelCommand } from './commands/model.js';
+import { mcpCommand } from './commands/mcp.js';
 
 const program = new Command();
 
@@ -19,5 +26,13 @@ program.addCommand(doctorCommand);
 program.addCommand(targetCommand);
 program.addCommand(reportCommand);
 program.addCommand(installCommand);
+program.addCommand(daemonCommand);
+program.addCommand(guiCommand);
+program.addCommand(attachCommand);
+program.addCommand(memoryCommand);
+program.addCommand(pluginCommand);
+program.addCommand(configCommand);
+program.addCommand(modelCommand);
+program.addCommand(mcpCommand);
 
 program.parse();

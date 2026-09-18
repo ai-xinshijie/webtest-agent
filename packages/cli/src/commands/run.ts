@@ -1,74 +1,118 @@
 import { Command } from 'commander';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { createDefaultConfig } from '@wta/core';
 import type { TargetConfig } from '@wta/core';
+import { ensureDaemon } from './daemon.js';
+
+const RUN_MODES = ['continue', 'fresh', 'retest', 'expand', 'regression'] as const;
+const PHASES = ['explore', 'test', 'combo', 'chaos'] as const;
+
+type RunMode = typeof RUN_MODES[number];
+type Phase = typeof PHASES[number];
+
+interface RunOptions {
+  mode?: string;
+  phase?: string;
+  headed?: boolean;
+  headless?: boolean;
+  parallel?: string;
+  maxTime?: string;
+  resume?: boolean;
+  foreground?: boolean;
+}
+
+function loadTarget(targetName: string): TargetConfig {
+  const file = path.join(process.cwd(), '.wta', 'targets', `${targetName}.json`);
+  if (!existsSync(file)) {
+    throw new Error(`未找到测试目标：${targetName}，期望路径：${file}`);
+  }
+  return JSON.parse(readFileSync(file, 'utf-8')) as TargetConfig;
+}
+
+function parseMode(value: string | undefined): RunMode {
+  const mode = value ?? 'continue';
+  if (!RUN_MODES.includes(mode as RunMode)) {
+    throw new Error(`无效运行模式：${mode}，可选值：${RUN_MODES.join('、')}`);
+  }
+  return mode as RunMode;
+}
+
+function parsePhase(value: string | undefined): Phase | undefined {
+  if (!value) return undefined;
+  if (!PHASES.includes(value as Phase)) {
+    throw new Error(`无效测试阶段：${value}，可选值：${PHASES.join('、')}`);
+  }
+  return value as Phase;
+}
 
 export const runCommand = new Command('run')
-  .description('Start a test session')
-  .argument('<target>', 'target name')
-  .option('--mode <mode>', 'run mode: continue|fresh|retest|expand|regression', 'continue')
-  .option('--phase <phase>', 'specific phase: explore|test|combo|chaos')
-  .option('--headed', 'run browser in headed mode')
-  .option('--headless', 'run browser in headless mode')
-  .option('--parallel <n>', 'parallel browser count', '1')
-  .option('--max-time <time>', 'max duration (e.g. 4h)')
-  .option('--resume', 'resume from last checkpoint')
-  .option('--foreground', 'run in foreground (print output)')
-  .action(async (targetName: string, options: {
-    mode?: string;
-    phase?: string;
-    headed?: boolean;
-    headless?: boolean;
-    parallel?: string;
-    maxTime?: string;
-    resume?: boolean;
-    foreground?: boolean;
-  }) => {
-    const cwd = process.cwd();
-    const jsonFile = path.join(cwd, '.wta', 'targets', `${targetName}.json`);
-
-    if (!existsSync(jsonFile)) {
-      console.error(`Target not found: ${targetName}`);
-      console.error(`Expected: ${jsonFile}`);
-      process.exit(1);
-    }
-
-    let targetConfig: TargetConfig;
+  .description('启动测试会话，默认提交给常驻代理后台执行')
+  .argument('<target>', '测试目标名称')
+  .option('--mode <mode>', '运行模式：continue、fresh、retest、expand、regression', 'continue')
+  .option('--phase <phase>', '测试阶段：explore、test、combo、chaos')
+  .option('--headed', '有头模式运行浏览器')
+  .option('--headless', '无头模式运行浏览器')
+  .option('--parallel <n>', '并行浏览器数量', '1')
+  .option('--max-time <time>', '最大运行时长，例如 4h')
+  .option('--resume', '恢复上一次会话')
+  .option('--foreground', '前台执行，不提交给常驻代理')
+  .action(async (targetName: string, options: RunOptions) => {
     try {
-      const raw = readFileSync(jsonFile, 'utf-8');
-      targetConfig = JSON.parse(raw) as TargetConfig;
-    } catch {
-      console.error(`Failed to parse target config: ${jsonFile}`);
-      process.exit(1);
-    }
+      const target = loadTarget(targetName);
+      const mode = parseMode(options.mode);
+      const phase = parsePhase(options.phase);
+      const parallel = Math.max(1, Math.min(Number(options.parallel ?? '1'), 8));
+      const headless = options.headless ?? !options.headed;
 
-    console.log(`Starting test: ${targetName}`);
-    console.log(`  URL: ${targetConfig.url}`);
-    console.log(`  Mode: ${options.mode}`);
-    console.log(`  Phase: ${options.phase ?? 'all'}`);
+      console.log(`启动测试：${target.name}`);
+      console.log(`  地址：${target.url}`);
+      console.log(`  模式：${mode}`);
+      console.log(`  阶段：${phase ?? '全部'}`);
+      console.log(`  并行：${parallel}`);
 
-    const { Orchestrator } = await import('@wta/core');
-    const config = createDefaultConfig(cwd);
-    const orchestrator = new Orchestrator(config);
+      if (options.foreground) {
+        const { Orchestrator, ConfigManager } = await import('@wta/core');
+        const config = new ConfigManager(process.cwd()).load();
+        const orchestrator = new Orchestrator(config);
+        const session = await orchestrator.run(target, {
+          runMode: mode,
+          phase,
+          parallel,
+          headless,
+          resumeSessionId: undefined,
+        });
 
-    try {
-      const session = await orchestrator.run(targetConfig, {
-        runMode: options.mode,
-        phase: options.phase,
-        headless: options.headless ?? !options.headed,
-        parallel: parseInt(options.parallel ?? '1', 10),
+        console.log(`会话完成：${session.id}`);
+        console.log(`  状态：${session.status}`);
+        console.log(`  报告：${session.reportPaths?.join('、') ?? '未生成'}`);
+        process.exit(session.status === 'failed' ? 1 : 0);
+      }
+
+      const baseUrl = await ensureDaemon();
+      const response = await fetch(`${baseUrl}/api/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: target.name,
+          mode,
+          phase,
+          parallel,
+          headless,
+          resume: Boolean(options.resume),
+        }),
       });
 
-      console.log(`Session ${session.id} completed`);
-      console.log(`  Status: ${session.status}`);
-      console.log(`  Duration: ${((session.endedAt! - session.startedAt) / 1000).toFixed(1)}s`);
-
-      if (session.status === 'failed') {
-        process.exit(1);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`提交测试失败：${response.status} ${text}`);
       }
+
+      const result = await response.json() as { sessionId: string };
+      console.log(`测试已提交：${result.sessionId}`);
+      console.log(`查看进度：wta attach ${result.sessionId}`);
+      console.log(`GUI 监控：${baseUrl}/?session=${result.sessionId}`);
     } catch (error) {
-      console.error('Test failed:', error instanceof Error ? error.message : error);
+      console.error(`测试启动失败：${error instanceof Error ? error.message : error}`);
       process.exit(2);
     }
   });

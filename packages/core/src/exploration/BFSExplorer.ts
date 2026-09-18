@@ -1,9 +1,10 @@
 import type { Page } from 'playwright';
 import type { StructuredObservation } from '../perception/types.js';
-import { classifyComponent, type ComponentModel, type PageNode, type Component } from '../cognition/ComponentModel.js';
+import { classifyComponent } from '../cognition/ComponentModel.js';
 import type { DatabaseManager } from '../db/Database.js';
 import { randomUUID } from 'node:crypto';
 import type { AgentLogger } from '../logger/AgentLogger.js';
+import type { ComponentRevealer } from './ComponentRevealer.js';
 
 export interface ExplorerOptions {
   maxPages: number;
@@ -19,7 +20,7 @@ export interface ExplorationResult {
 }
 
 /**
- * BFS page explorer: discovers all reachable pages via navigation links.
+ * 广度优先页面探索器，负责发现可达页面并持久化组件模型。
  */
 export class BFSExplorer {
   private visitedUrls = new Set<string>();
@@ -31,11 +32,9 @@ export class BFSExplorer {
     private targetId: string,
     private options: ExplorerOptions = { maxPages: 50, maxDepth: 3, excludePaths: [] },
     private logger?: AgentLogger,
+    private revealer?: ComponentRevealer,
   ) {}
 
-  /**
-   * Explore pages starting from the current URL.
-   */
   async explore(page: Page, startUrl: string): Promise<ExplorationResult> {
     const result: ExplorationResult = {
       pagesVisited: 0,
@@ -50,31 +49,31 @@ export class BFSExplorer {
       const { url, depth, trigger } = this.queue.shift()!;
       const normalizedUrl = this.normalizeUrl(url);
 
-      // Skip if already visited
       if (this.visitedUrls.has(normalizedUrl)) continue;
       this.visitedUrls.add(normalizedUrl);
-
-      // Skip excluded paths
       if (this.options.excludePaths.some(path => normalizedUrl.includes(path))) continue;
 
-      // Navigate to page
       try {
-        const navigate = () => page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        const navigate = () => page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 15000,
+        });
         if (this.logger) {
           await this.logger.runScript(
-          { description: `探索页面：${normalizedUrl}`, module: 'BFSExplorer', method: 'page.goto' },
-          { type: 'navigate', target: url, params: { depth, trigger } },
+            { description: `探索页面：${normalizedUrl}`, module: 'BFSExplorer', method: 'page.goto' },
+            { type: 'navigate', target: url, params: { depth, trigger } },
             navigate,
             { pageUrl: url, phase: 'explore' },
           );
         } else {
           await navigate();
         }
+
         const waitForContent = () => page.waitForTimeout(1000);
         if (this.logger) {
           await this.logger.runScript(
-          { description: '等待动态内容加载', module: 'BFSExplorer', method: 'waitForTimeout' },
-          { type: 'wait', target: url, params: { timeout: 1000 } },
+            { description: '等待动态内容加载', module: 'BFSExplorer', method: 'waitForTimeout' },
+            { type: 'wait', target: url, params: { timeout: 1000 } },
             waitForContent,
             { pageUrl: url, phase: 'explore' },
           );
@@ -82,27 +81,39 @@ export class BFSExplorer {
           await waitForContent();
         }
       } catch (error) {
-        console.warn(`  [explorer] Failed to navigate to ${url}: ${error instanceof Error ? error.message : error}`);
+        const reason = error instanceof Error ? error.message : String(error);
+        console.warn(`  探索器：页面导航失败 ${url}：${reason}`);
         this.logger?.logScript(
           { description: `页面导航失败：${normalizedUrl}`, module: 'BFSExplorer', method: 'page.goto' },
           { type: 'navigate', target: url, params: { depth, trigger } },
-          { status: 'warning', duration: 0, error: error instanceof Error ? error.message : String(error) },
+          { status: 'warning', duration: 0, error: reason },
           { pageUrl: url, phase: 'explore' },
         );
         continue;
       }
 
-      // Capture and classify
-      const observation = await (
-        this.logger
-          ? this.logger.runScript(
-              { description: '结构化提取页面组件', module: 'StructuredPerceiver', method: 'capture' },
-              { type: 'perceive', target: url, params: { componentCountExpected: true } },
-              () => this.perceiver.capture(page),
-              { pageUrl: url, phase: 'explore' },
-            )
-          : this.perceiver.capture(page)
-      );
+      if (this.revealer) {
+        const revealResult = await this.revealer.reveal(page, {
+          pageUrl: url,
+          phase: 'explore',
+        });
+        this.logger?.logScript(
+          { description: '组件揭示完成', module: 'ComponentRevealer', method: 'reveal' },
+          { type: 'reveal', target: url, params: { interactions: revealResult.interactions } },
+          { status: 'success', duration: 0, output: revealResult },
+          { pageUrl: url, phase: 'explore' },
+        );
+      }
+
+      const observation = this.logger
+        ? await this.logger.runScript(
+            { description: '结构化提取页面组件', module: 'StructuredPerceiver', method: 'capture' },
+            { type: 'perceive', target: url, params: { componentCountExpected: true } },
+            () => this.perceiver.capture(page),
+            { pageUrl: url, phase: 'explore' },
+          )
+        : await this.perceiver.capture(page);
+
       const pageId = this.persistPage(observation, normalizedUrl);
       this.logger?.logScript(
         { description: '持久化页面组件模型', module: 'BFSExplorer', method: 'persistPage' },
@@ -112,7 +123,6 @@ export class BFSExplorer {
       );
       result.pagesVisited++;
 
-      // Extract all links directly from the page (more reliable than component selectors)
       const pageLinks = await page.evaluate(`
         Array.from(document.querySelectorAll('a[href]')).map(el => ({
           href: el.getAttribute('href') || '',
@@ -127,56 +137,88 @@ export class BFSExplorer {
         if (!absoluteUrl) continue;
 
         const normalizedTarget = this.normalizeUrl(absoluteUrl);
-
-        // Only follow same-origin links
         const currentOrigin = new URL(observation.url).origin;
         const targetOrigin = new URL(absoluteUrl).origin;
         if (currentOrigin !== targetOrigin) continue;
-
-        // Skip excluded paths
         if (this.options.excludePaths.some(path => normalizedTarget.includes(path))) continue;
 
-        if (!this.visitedUrls.has(normalizedTarget)) {
-          if (depth < this.options.maxDepth) {
-            this.queue.push({ url: absoluteUrl, depth: depth + 1, trigger: link.text || 'link' });
-            result.navigationGraph.push({ from: normalizedUrl, to: normalizedTarget, trigger: link.text || 'link' });
-          }
+        const edge = { from: normalizedUrl, to: normalizedTarget, trigger: link.text || 'link' };
+        result.navigationGraph.push(edge);
+        this.persistNavigationEdge(pageId, normalizedTarget, edge.trigger);
+
+        if (!this.visitedUrls.has(normalizedTarget) && depth < this.options.maxDepth) {
+          this.queue.push({
+            url: absoluteUrl,
+            depth: depth + 1,
+            trigger: link.text || 'link',
+          });
         }
       }
 
       result.totalComponents += observation.components.length;
-      console.log(`  [explorer] Visited ${result.pagesVisited}: ${normalizedUrl} (${pageLinks.length} links, ${observation.components.length} components, queue: ${this.queue.length})`);
+      console.log(
+        `  探索页面 ${result.pagesVisited}：${normalizedUrl}，` +
+        `链接 ${pageLinks.length} 个，组件 ${observation.components.length} 个，队列 ${this.queue.length} 个`,
+      );
     }
 
     result.newPagesDiscovered = result.pagesVisited;
     return result;
   }
 
-  /**
-   * Persist a page and its components to the database.
-   */
   private persistPage(observation: StructuredObservation, urlPattern: string): string {
-    const pageId = randomUUID();
+    const existingPage = this.db.prepare(`
+      SELECT id, visit_count FROM pages WHERE target_id = ? AND url_pattern = ?
+    `).get(this.targetId, urlPattern) as { id: string; visit_count: number } | undefined;
 
-    this.db.prepare(`
-      INSERT OR REPLACE INTO pages (id, target_id, url_pattern, title, role, first_seen_at, last_visited_at, visit_count, test_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'partial')
-    `).run(pageId, this.targetId, urlPattern, observation.title, 'unknown', Date.now(), Date.now());
-
-    const insertComponent = this.db.prepare(`
-      INSERT INTO components (id, target_id, page_id, type, selector, label, state_json, confidence, source, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    let pageId: string;
+    if (existingPage) {
+      pageId = existingPage.id;
+      this.db.prepare(`
+        UPDATE pages
+        SET title = ?, last_visited_at = ?, visit_count = ?
+        WHERE id = ?
+      `).run(observation.title, Date.now(), existingPage.visit_count + 1, pageId);
+    } else {
+      pageId = randomUUID();
+      this.db.prepare(`
+        INSERT INTO pages
+          (id, target_id, url_pattern, title, role, first_seen_at, last_visited_at, visit_count, test_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'partial')
+      `).run(
+        pageId,
+        this.targetId,
+        urlPattern,
+        observation.title,
+        'unknown',
+        Date.now(),
+        Date.now(),
+      );
+    }
 
     for (const extracted of observation.components) {
       const classified = classifyComponent(extracted);
-      insertComponent.run(
+      const selector = extracted.selector ?? extracted.tag;
+      const label = extracted.text ?? extracted.ariaLabel ?? 'unknown';
+
+      this.db.prepare(`
+        INSERT INTO components
+          (id, target_id, page_id, type, selector, label, state_json, confidence, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(target_id, page_id, selector) DO UPDATE SET
+          type = excluded.type,
+          label = excluded.label,
+          state_json = excluded.state_json,
+          confidence = excluded.confidence,
+          source = excluded.source,
+          updated_at = excluded.updated_at
+      `).run(
         randomUUID(),
         this.targetId,
         pageId,
         classified.type,
-        extracted.selector ?? extracted.tag,
-        extracted.text ?? extracted.ariaLabel ?? 'unknown',
+        selector,
+        label,
         JSON.stringify(extracted.state),
         classified.confidence,
         classified.source,
@@ -188,11 +230,19 @@ export class BFSExplorer {
     return pageId;
   }
 
+  private persistNavigationEdge(fromPageId: string, toUrlPattern: string, trigger: string): void {
+    const toPage = this.db.prepare(`
+      SELECT id FROM pages WHERE target_id = ? AND url_pattern = ?
+    `).get(this.targetId, toUrlPattern) as { id: string } | undefined;
+    if (!toPage) return;
 
+    this.db.prepare(`
+      INSERT INTO navigation_edges (id, target_id, from_page_id, to_page_id, trigger_component_id, method)
+      VALUES (?, ?, ?, ?, NULL, ?)
+      ON CONFLICT(target_id, from_page_id, to_page_id, method) DO NOTHING
+    `).run(randomUUID(), this.targetId, fromPageId, toPage.id, trigger);
+  }
 
-  /**
-   * Resolve relative URL to absolute.
-   */
   private resolveUrl(href: string, baseUrl: string): string | null {
     try {
       if (href.startsWith('#') || href.startsWith('javascript:') || href.startsWith('mailto:')) {
@@ -204,9 +254,6 @@ export class BFSExplorer {
     }
   }
 
-  /**
-   * Normalize URL for dedup (remove hash, trailing slash).
-   */
   private normalizeUrl(url: string): string {
     try {
       const parsed = new URL(url);

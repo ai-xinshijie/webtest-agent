@@ -3,4 +3,5 @@ packages:
   - 'plugins/*'
 allowBuilds:
   better-sqlite3: true
+  esbuild: true
 enablePrePostScripts: true

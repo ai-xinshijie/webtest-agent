@@ -199,10 +199,18 @@ CREATE TABLE IF NOT EXISTS agent_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_components_page ON components(page_id);
+DELETE FROM components WHERE id NOT IN (
+  SELECT MIN(id) FROM components GROUP BY target_id, page_id, selector
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_components_unique ON components(target_id, page_id, selector);
 CREATE INDEX IF NOT EXISTS idx_components_target ON components(target_id);
 CREATE INDEX IF NOT EXISTS idx_test_results_session ON test_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_session ON bugs(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_target ON bugs(target_id);
+DELETE FROM navigation_edges WHERE id NOT IN (
+  SELECT MIN(id) FROM navigation_edges GROUP BY target_id, from_page_id, to_page_id, method
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_navigation_edges_unique ON navigation_edges(target_id, from_page_id, to_page_id, method);
 CREATE INDEX IF NOT EXISTS idx_memory_tested ON memory_tested_items(target_id);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
