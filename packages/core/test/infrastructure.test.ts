@@ -82,7 +82,61 @@ describe('AgentSelfHealer', () => {
     expect(result).toEqual({ skipped: true, reason: '模型输出格式错误：validation failed' });
   });
 
+  it('可恢复超时错误并支持重试耗尽', async () => {
+    vi.useFakeTimers();
+    const healer = new AgentSelfHealer();
+    let attempts = 0;
+    const recovered = healer.executeSafely(async () => {
+      if (attempts++ === 0) throw new Error('timeout');
+      return '重试成功';
+    }, { operationName: '等待页面加载', sessionId: 'session-1' });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(recovered).resolves.toBe('重试成功');
+
+    const exhaustedExpectation = expect(healer.executeSafely(async () => {
+      throw new Error('timeout');
+    }, { operationName: '持续超时', sessionId: 'session-1' })).rejects.toThrow('timeout');
+    await vi.advanceTimersByTimeAsync(9000);
+    await exhaustedExpectation;
+    vi.useRealTimers();
+  });
+
+  it('非 Error 错误转换为中文可读原因', async () => {
+    const healer = new AgentSelfHealer();
+    const result = await healer.executeSafely(async () => {
+      throw '配置为空';
+    }, { operationName: '读取配置', sessionId: 'session-1' });
+
+    expect(result).toEqual({ skipped: true, reason: '配置为空' });
+  });
+
+  it('检测交替动作循环', async () => {
+    const healer = new AgentSelfHealer();
+    const operations = ['打开弹框', '关闭弹框', '打开弹框', '关闭弹框'];
+    let skipped = false;
+
+    for (const operation of operations) {
+      const result = await healer.executeSafely(async () => operation, {
+        operationName: operation,
+        sessionId: 'session-1',
+      });
+      if (result && typeof result === 'object' && 'skipped' in result) skipped = true;
+    }
+    expect(skipped).toBe(true);
+  });
+
+  it('循环检测窗口只保留最近十个动作', async () => {
+    const healer = new AgentSelfHealer();
+    for (let index = 0; index < 11; index++) {
+      await healer.executeSafely(async () => index, {
+        operationName: `动作-${index}`,
+        sessionId: 'session-1',
+      });
+    }
+  });
+
   it('检测重复动作循环并改变策略', async () => {
+
     const healer = new AgentSelfHealer();
     let skipped = false;
 

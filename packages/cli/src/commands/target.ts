@@ -27,7 +27,7 @@ targetCommand
   .requiredOption('--url <url>', '测试目标地址')
   .requiredOption('--username <username>', '登录用户名')
   .requiredOption('--password <password>', '登录密码')
-  .option('--strategy <strategy>', '测试深度：quick、standard、deep', 'deep')
+    .option('--strategy <strategy>', '测试深度：quick、standard、deep')
   .action((options: {
     name: string;
     url: string;

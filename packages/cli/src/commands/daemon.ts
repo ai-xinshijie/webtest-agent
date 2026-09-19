@@ -29,7 +29,7 @@ function readState(): DaemonState | null {
 }
 
 function serverFile(): string {
-  return fileURLToPath(new URL('../../../gui/dist/server.js', import.meta.url));
+  return fileURLToPath(new URL('../../../gui/dist/main.js', import.meta.url));
 }
 
 async function health(port = 7878): Promise<boolean> {
@@ -101,7 +101,7 @@ export const daemonCommand = new Command('daemon')
 daemonCommand
   .command('start')
   .description('启动常驻测试代理')
-  .option('--port <port>', '服务端口', '7878')
+  .option('--port <port>', '服务端口')
   .action(async (options: { port?: string }) => {
     const port = Number(options.port ?? 7878);
     const url = await ensureDaemon(port);
@@ -124,7 +124,7 @@ daemonCommand
 
 export const guiCommand = new Command('gui')
   .description('启动 GUI 控制台')
-  .option('--port <port>', '服务端口', '7878')
+  .option('--port <port>', '服务端口')
   .option('--no-open', '不自动打开浏览器')
   .action(async (options: { port?: string; open?: boolean }) => {
     const port = Number(options.port ?? 7878);

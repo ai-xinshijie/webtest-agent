@@ -4,7 +4,6 @@ import websocket from '@fastify/websocket';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   AgentLogger,
   ConfigManager,
@@ -20,16 +19,6 @@ export interface GuiServerOptions {
   rootDir?: string;
   port?: number;
   host?: string;
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.WTA_PORT ?? 7878);
-  startGuiServer({ port })
-    .then(handle => console.log(`WebTestAgent GUI 已启动：http://127.0.0.1:${handle.port}`))
-    .catch(error => {
-      console.error(`GUI 启动失败：${error instanceof Error ? error.message : error}`);
-      process.exit(1);
-    });
 }
 
 export interface GuiServerHandle {

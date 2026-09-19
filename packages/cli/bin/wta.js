@@ -1,2 +1,4 @@
 #!/usr/bin/env node
-import '../dist/index.js';
+import { program } from '../dist/index.js';
+
+program.parse();

@@ -115,6 +115,7 @@ describe('常驻代理与运行命令', () => {
   });
 
   it('代理未运行时停止和状态输出中文提示', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false } as Response)));
     const stop = await runCliCommand(daemonCommand, 'stop');
     expect(stop.logs.join('\n')).toContain('常驻代理未运行');
 

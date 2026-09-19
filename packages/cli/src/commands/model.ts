@@ -21,8 +21,8 @@ modelCommand
   .requiredOption('--model <model>', '模型名称')
   .option('--base-url <url>', '自定义或兼容 API 地址')
   .option('--api-key <key>', 'API Key')
-  .option('--temperature <temperature>', '温度', '0')
-  .option('--max-tokens <tokens>', '最大输出 Token', '2000')
+  .option('--temperature <temperature>', '温度')
+  .option('--max-tokens <tokens>', '最大输出 Token')
   .action((task: string, options: {
     provider: string;
     model: string;
@@ -30,10 +30,10 @@ modelCommand
     apiKey?: string;
     temperature?: string;
     maxTokens?: string;
-  }) => {
+  }, command: Command) => {
     const configManager = new ConfigManager(process.cwd());
     const config = configManager.load();
-    config.models[task] = {
+    const modelConfig = {
       provider: options.provider as 'openai' | 'anthropic' | 'ollama' | 'custom',
       model: options.model,
       baseUrl: options.baseUrl,
@@ -41,6 +41,12 @@ modelCommand
       temperature: Number(options.temperature ?? 0),
       maxTokens: Number(options.maxTokens ?? 2000),
     };
+
+    // Commander 的同一个命令对象可重复解析，可选参数不会自动复位。
+    for (const key of ['baseUrl', 'apiKey', 'temperature', 'maxTokens'] as const) {
+      command.setOptionValue(key, undefined);
+    }
+    config.models[task] = modelConfig;
     configManager.save(config);
     console.log(`模型路由已更新：${task} -> ${options.provider}/${options.model}`);
   });

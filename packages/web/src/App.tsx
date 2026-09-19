@@ -217,7 +217,6 @@ export default function App() {
   );
 
   const startRun = async () => {
-    if (!selectedTarget) return;
     setBusy(true);
     try {
       const response = await fetch('/api/run', {

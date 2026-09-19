@@ -13,26 +13,30 @@ import { configCommand } from './commands/config.js';
 import { modelCommand } from './commands/model.js';
 import { mcpCommand } from './commands/mcp.js';
 
-const program = new Command();
+export function createProgram(): Command {
+  const program = new Command();
 
-program
-  .name('wta')
-  .description('自主 Web 界面深度测试代理')
-  .version('0.1.0');
+  program
+    .name('wta')
+    .description('自主 Web 界面深度测试代理')
+    .version('0.1.0');
 
-program.addCommand(initCommand);
-program.addCommand(runCommand);
-program.addCommand(doctorCommand);
-program.addCommand(targetCommand);
-program.addCommand(reportCommand);
-program.addCommand(installCommand);
-program.addCommand(daemonCommand);
-program.addCommand(guiCommand);
-program.addCommand(attachCommand);
-program.addCommand(memoryCommand);
-program.addCommand(pluginCommand);
-program.addCommand(configCommand);
-program.addCommand(modelCommand);
-program.addCommand(mcpCommand);
+  program.addCommand(initCommand);
+  program.addCommand(runCommand);
+  program.addCommand(doctorCommand);
+  program.addCommand(targetCommand);
+  program.addCommand(reportCommand);
+  program.addCommand(installCommand);
+  program.addCommand(daemonCommand);
+  program.addCommand(guiCommand);
+  program.addCommand(attachCommand);
+  program.addCommand(memoryCommand);
+  program.addCommand(pluginCommand);
+  program.addCommand(configCommand);
+  program.addCommand(modelCommand);
+  program.addCommand(mcpCommand);
 
-program.parse();
+  return program;
+}
+
+export const program = createProgram();
