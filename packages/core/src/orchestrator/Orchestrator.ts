@@ -750,5 +750,6 @@ export class Orchestrator {
   async close(): Promise<void> {
     await this.browserManager.close();
     this.sessions.clear();
+    this.db.close();
   }
 }

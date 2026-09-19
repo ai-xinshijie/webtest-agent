@@ -218,6 +218,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, sourc
 
 export class DatabaseManager {
   private db: DatabaseSync;
+  private closed = false;
 
   constructor(dbPath: string) {
     const dir = path.dirname(dbPath);
@@ -250,6 +251,8 @@ export class DatabaseManager {
   }
 
   close(): void {
+    if (this.closed) return;
     this.db.close();
+    this.closed = true;
   }
 }
