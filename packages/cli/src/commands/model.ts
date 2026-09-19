@@ -63,9 +63,14 @@ modelCommand
   .action(() => {
     const config = new ConfigManager(process.cwd()).load();
     const db = new DatabaseManager(config.dbPath);
-    const rows = db.prepare(`
-      SELECT log_json FROM agent_logs WHERE source = 'model'
-    `).all() as Array<{ log_json: string }>;
+    let rows: Array<{ log_json: string }>;
+    try {
+      rows = db.prepare(`
+        SELECT log_json FROM agent_logs WHERE source = 'model'
+      `).all() as Array<{ log_json: string }>;
+    } finally {
+      db.close();
+    }
     const stats = new Map<string, { calls: number; failed: number; tokens: number }>();
     for (const row of rows) {
       const log = JSON.parse(row.log_json) as {

@@ -69,6 +69,10 @@ interface CompressOptions {
 export class MemoryManager {
   constructor(private db: DatabaseManager) {}
 
+  close(): void {
+    this.db.close();
+  }
+
   getOverview(): MemoryOverview {
     const count = (table: string): number =>
       (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;

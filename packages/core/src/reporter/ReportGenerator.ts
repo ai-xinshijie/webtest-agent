@@ -206,7 +206,9 @@ export class ReportGenerator {
     const content = this.generate(sessionId);
     const ext = this.options.format === 'json' ? 'json' : 'md';
     const defaultName = `report-${sessionId.slice(0, 8)}.${ext}`;
-    const outputPath = path.join(this.options.outputDir, filename ?? defaultName);
+    const outputPath = filename
+      ? path.resolve(filename)
+      : path.join(this.options.outputDir, defaultName);
 
     const dir = path.dirname(outputPath);
     mkdirSync(dir, { recursive: true });

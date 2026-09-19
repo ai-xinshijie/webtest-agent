@@ -17,7 +17,7 @@ const program = new Command();
 
 program
   .name('wta')
-  .description('Autonomous Web UI testing agent')
+  .description('自主 Web 界面深度测试代理')
   .version('0.1.0');
 
 program.addCommand(initCommand);

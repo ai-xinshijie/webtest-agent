@@ -54,6 +54,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
   const rootDir = options.rootDir ?? process.cwd();
   const port = options.port ?? 7878;
   const host = options.host ?? '127.0.0.1';
+  let actualPort = port;
   const configManager = new ConfigManager(rootDir);
   let agentConfig = configManager.load();
   const db = new DatabaseManager(agentConfig.dbPath);
@@ -127,7 +128,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
   fastify.get('/api/health', async () => ({
     status: '运行中',
     pid: process.pid,
-    port,
+    port: actualPort,
     startedAt: Math.floor(Date.now() / 1000),
   }));
 
@@ -244,11 +245,16 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
   });
 
   fastify.post('/api/daemon/stop', async (_request, reply) => {
-    reply.send({ status: '正在停止' });
-    if (existsSync(stateFile)) rmSync(stateFile);
-    await orchestrator?.close();
-    await fastify.close();
-    closeDatabase();
+    reply.header('connection', 'close');
+    reply.raw.once('close', () => {
+      setImmediate(async () => {
+        if (existsSync(stateFile)) rmSync(stateFile);
+        await orchestrator?.close();
+        await fastify.close();
+        closeDatabase();
+      });
+    });
+    return { status: '正在停止' };
   });
 
   mkdirSync(path.dirname(stateFile), { recursive: true });
@@ -260,6 +266,8 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
   };
 
   await fastify.listen({ port, host });
-  writeFileSync(stateFile, JSON.stringify({ pid: process.pid, port, startedAt: Date.now() }, null, 2), 'utf-8');
-  return { fastify, port, close };
+  const address = fastify.server.address();
+  actualPort = typeof address === 'object' && address ? address.port : port;
+  writeFileSync(stateFile, JSON.stringify({ pid: process.pid, port: actualPort, startedAt: Date.now() }, null, 2), 'utf-8');
+  return { fastify, port: actualPort, close };
 }

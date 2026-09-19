@@ -90,6 +90,11 @@ export class PluginManager {
       throw new Error(`插件入口越界：${manifest.name}`);
     }
 
+    if (!existsSync(entryPath)) {
+      console.warn(`跳过未构建插件：${manifest.name}`);
+      return null;
+    }
+
     const imported = await import(pathToFileURL(entryPath).href);
     const plugin = (imported.default ?? imported.plugin ?? imported) as WtaPlugin;
     if (plugin.name !== manifest.name) {

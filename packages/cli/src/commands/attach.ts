@@ -20,9 +20,10 @@ const sourceText: Record<string, string> = {
 export const attachCommand = new Command('attach')
   .description('附加到测试会话并实时查看时间线')
   .argument('[sessionId]', '测试会话 ID，默认最近会话')
-  .action(async (sessionId?: string) => {
+  .option('--port <port>', 'GUI 服务端口', '7878')
+  .action(async (sessionId: string | undefined, options: { port?: string }) => {
     try {
-      const baseUrl = await ensureDaemon();
+      const baseUrl = await ensureDaemon(Number(options.port));
       let targetSession = sessionId;
 
       if (!targetSession) {

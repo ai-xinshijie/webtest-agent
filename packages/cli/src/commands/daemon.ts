@@ -75,7 +75,15 @@ async function stopDaemon(): Promise<void> {
 
   const response = await fetch(`http://127.0.0.1:${port}/api/daemon/stop`, { method: 'POST' });
   if (!response.ok) throw new Error(`停止常驻代理失败：${response.status}`);
-  console.log('常驻代理已停止');
+
+  for (let index = 0; index < 40; index++) {
+    if (!(await health(port))) {
+      console.log('常驻代理已停止');
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error('常驻代理停止超时');
 }
 
 async function printStatus(): Promise<void> {
