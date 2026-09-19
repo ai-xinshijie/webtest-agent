@@ -86,6 +86,13 @@ const timeline = [
     trigger: { module: 'System', method: 'init' },
     result: { status: 'success' as const, duration: 2, output: 123 },
   },
+  {
+    id: 'missing-result-log',
+    sequence: 5,
+    timestamp: 1700000004000,
+    source: 'script' as const,
+    trigger: { description: '未返回结果' },
+  },
 ];
 
 const memory = {
@@ -108,6 +115,13 @@ const plugins = [{
   loaded: true,
   toolCount: 2,
   description: '测试插件',
+}, {
+  name: '停用插件',
+  version: '0.2.0',
+  enabled: false,
+  loaded: false,
+  toolCount: 0,
+  description: '停用示例',
 }];
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -188,10 +202,11 @@ describe('Web GUI', () => {
     expect(screen.getByText('75.0%')).toBeTruthy();
     expect(screen.getByText('警告')).toBeTruthy();
     expect(screen.getByText('失败')).toBeTruthy();
-    expect(screen.getByText('脚本')).toBeTruthy();
+    expect(screen.getAllByText('脚本').length).toBeGreaterThan(0);
     expect(screen.getByText('模型')).toBeTruthy();
     expect(screen.getByText('系统')).toBeTruthy();
     expect(screen.getByText('用户')).toBeTruthy();
+    expect(screen.getByText('未返回结果')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /执行登录/ }));
     fireEvent.click(screen.getByRole('button', { name: /识别组件/ }));
@@ -209,6 +224,14 @@ describe('Web GUI', () => {
     expect(screen.getAllByText('0.0%')).toHaveLength(3);
   });
 
+  it('使用 HTTPS 页面时建立 WSS 连接', async () => {
+    vi.stubGlobal('location', { protocol: 'https:', host: 'secure.test' });
+    render(createElement(App));
+    await screen.findAllByText('demo');
+    const socket = MockWebSocket.instances.at(-1)!;
+    expect(socket.url).toBe('wss://secure.test/ws');
+  });
+
   it('通过 WebSocket 刷新会话状态', async () => {
     render(createElement(App));
     await screen.findAllByText('demo');
@@ -216,6 +239,31 @@ describe('Web GUI', () => {
 
     socket.onmessage?.({ data: JSON.stringify({ sessions: [{ ...session, status: 'stopped' }] }) });
     await screen.findByText('已停止');
+
+    socket.onmessage?.({ data: JSON.stringify({ type: 'status' }) });
+    await Promise.resolve();
+    expect(screen.getByText('已停止')).toBeTruthy();
+  });
+
+  it('默认阶段为全部并容忍无会话 ID 响应', async () => {
+    render(createElement(App));
+    await screen.findAllByText('demo');
+    const originalFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/run') return response({});
+      return originalFetch(input, init);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '启动' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/run')).toBe(true));
+    const runCall = fetchMock.mock.calls.find(call => String(call[0]) === '/api/run')!;
+    expect(JSON.parse(String(runCall[1]!.body))).toEqual({
+      target: 'demo',
+      mode: 'continue',
+      parallel: 1,
+      headless: true,
+    });
+    await screen.findByText('执行时间线');
   });
 
   it('展示报告、记忆、插件并保存配置', async () => {
@@ -233,6 +281,7 @@ describe('Web GUI', () => {
     fireEvent.click(screen.getByRole('button', { name: '插件' }));
     expect(await screen.findByText('示例插件')).toBeTruthy();
     expect(screen.getByText('启用')).toBeTruthy();
+    expect(screen.getByText('停用')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     const textarea = await screen.findByRole('textbox');

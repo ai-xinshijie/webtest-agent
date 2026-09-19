@@ -273,6 +273,19 @@ describe('运行和附加命令分支', () => {
     vi.unstubAllGlobals();
   });
 
+  it('启动失败支持非 Error 异常', async () => {
+    await runCliCommand(initCommand);
+    await addTarget('demo', 'deep');
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      if (String(url).endsWith('/api/health')) return { ok: true } as Response;
+      throw '接口异常';
+    }));
+
+    const result = await runCliCommand(runCommand, 'demo');
+    expect(result.errors.join('\n')).toContain('测试启动失败：接口异常');
+    vi.unstubAllGlobals();
+  });
+
   it('附加最近会话并处理时间线字段缺失', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
@@ -356,6 +369,36 @@ describe('运行和附加命令分支', () => {
 });
 
 describe('环境检查分支', () => {
+  it('未初始化项目时输出初始化提示', async () => {
+    const result = await runCliCommand(doctorCommand);
+    expect(result.logs.join('\n')).toContain('未初始化，请执行 wta init');
+  });
+
+  it('配置异常支持非 Error 描述', async () => {
+    const loadSpy = vi.spyOn(ConfigManager.prototype, 'load').mockImplementationOnce(() => {
+      throw '配置不是对象';
+    });
+    const logs: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...values) => {
+      logs.push(values.map(value => String(value)).join(' '));
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit');
+    });
+
+    try {
+      await doctorCommand.parseAsync([], { from: 'user' });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'process.exit') throw error;
+    } finally {
+      loadSpy.mockRestore();
+      logSpy.mockRestore();
+      exitSpy.mockRestore();
+    }
+
+    expect(logs.join('\n')).toContain('配置不是对象');
+  });
+
   it('配置损坏时输出中文错误', async () => {
     mkdirSync(path.join(tempDir, '.wta'), { recursive: true });
     writeFileSync(path.join(tempDir, '.wta', 'config.json'), '不是 JSON', 'utf-8');

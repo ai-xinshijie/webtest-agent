@@ -178,6 +178,16 @@ describe('常驻代理分支', () => {
     await expectation;
   });
 
+  it('start 和 GUI 未指定端口时使用默认端口', async () => {
+    fetchState.health = () => true;
+
+    const start = await runCommand(await loadDaemonCommand(), 'start');
+    expect(start.logs.join('\n')).toContain('http://127.0.0.1:7878');
+
+    const gui = await runCommand(await loadGuiCommand(), '--no-open');
+    expect(gui.logs.join('\n')).toContain('http://127.0.0.1:7878');
+  });
+
   it('状态输出运行信息和 PID', async () => {
     writeState({ pid: 12345, port: 1234 });
     fetchState.health = () => true;

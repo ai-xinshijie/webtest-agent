@@ -41,7 +41,7 @@ interface RunRequestBody {
  */
 export async function startGuiServer(options: GuiServerOptions = {}): Promise<GuiServerHandle> {
   const rootDir = options.rootDir ?? process.cwd();
-  const port = options.port ?? 7878;
+  const port = options.port ?? 0;
   const host = options.host ?? '127.0.0.1';
   let actualPort = port;
   const configManager = new ConfigManager(rootDir);

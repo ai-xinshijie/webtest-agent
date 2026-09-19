@@ -112,4 +112,13 @@ describe('浏览器安装命令', () => {
     expect(installed.logs.join('\n')).toContain('firefox：已安装');
     expect(installed.logs.join('\n')).toContain('webkit：已安装');
   });
+
+  it('浏览器目录存在但不可用时输出未安装', async () => {
+    mkdirSync(path.join(tempDir, 'vendor', 'browsers'), { recursive: true });
+
+    const result = await runInstall('status');
+    expect(result.logs.join('\n')).toContain('chromium：未安装');
+    expect(result.logs.join('\n')).toContain('firefox：未安装');
+    expect(result.logs.join('\n')).toContain('webkit：未安装');
+  });
 });
