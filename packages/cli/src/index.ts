@@ -12,6 +12,8 @@ import { pluginCommand } from './commands/plugin.js';
 import { configCommand } from './commands/config.js';
 import { modelCommand } from './commands/model.js';
 import { mcpCommand } from './commands/mcp.js';
+import { statusCommand, stopCommand } from './commands/session.js';
+import { authCommand } from './commands/auth.js';
 
 export function createProgram(): Command {
   const program = new Command();
@@ -35,6 +37,9 @@ export function createProgram(): Command {
   program.addCommand(configCommand);
   program.addCommand(modelCommand);
   program.addCommand(mcpCommand);
+  program.addCommand(statusCommand);
+  program.addCommand(stopCommand);
+  program.addCommand(authCommand);
 
   return program;
 }

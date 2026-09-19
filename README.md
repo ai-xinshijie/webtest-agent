@@ -1,110 +1,96 @@
 # WebTestAgent
 
-Autonomous Web UI testing agent with self-healing, memory, and coverage guarantees.
+面向复杂业务 Web 界面的自主深度测试代理。给定 URL、测试账号和策略后，Agent 使用项目内置 Playwright 浏览器探索页面、提取组件、执行动作与组合测试、记录完整时间线，并输出中文 Markdown 与机器可读 JSON 报告。
 
-## What It Does
+## 已实现能力
 
-Given a target URL and credentials, the agent autonomously:
-- Explores all reachable pages via BFS navigation
-- Identifies components (forms, buttons, modals, accordions, tabs, dropdowns)
-- Fills and submits forms with valid/invalid/boundary test data
-- Checks quality rules (feedback, validation, no-crash, recoverability)
-- Finds bugs and generates reports with reproduction steps
-- Accumulates memory across sessions (tested items, UI patterns, learned rules)
-- Compiles passed tests into fast replayable scripts (10-50x faster regression)
+- CLI 是核心入口；`wta gui` 提供同一常驻 Agent 的本地可视化控制台。
+- 项目内置浏览器存放在 `vendor/browsers`，不依赖用户安装的 Chrome。Linux 无头模式使用对应 Linux Chromium 包，系统依赖可通过 `wta install deps` 安装。
+- 自定义 DOM/CSS 结构化提取脚本识别按钮、表单、下拉、弹框、手风琴、标签页、表格等组件；截图作为按需视觉补充通道。
+- BFS 页面探索、逐组件动作覆盖、n-wise 组合覆盖、路径覆盖与深度网络故障注入。不可见或禁用控件会记录为受阻覆盖，绝不浪费动作超时。
+- `continue`、`fresh`、`retest`、`expand`、`regression` 重跑策略与跨会话记忆。
+- 多浏览器上下文并行执行，最多 8 个 Worker。
+- 登录状态复用、验证码/2FA 人工接管、插件与 MCP 客户端扩展、模型按任务路由。
+- 每步脚本、模型、系统和用户操作均写入 SQLite 审计时间线；GUI 默认展示摘要，可展开请求、响应、参数、结果与截图。
+- 受控自愈：浏览器崩溃自动重启；代码修复默认仅诊断和建议，自动补丁必须通过高风险审查、构建和测试验证，否则回滚。
 
-## Quick Start
+## 快速开始
 
 ```bash
-# Clone and install
 git clone https://github.com/ai-xinshijie/webtest-agent.git
 cd webtest-agent
 pnpm install
+pnpm build
 
-# Install browser
-cd packages/core && npx playwright install chromium && cd ../..
-
-# Initialize project
-node packages/cli/dist/index.js init .
-
-# Add a test target
-node packages/cli/dist/index.js target add \
-  --name myapp \
-  --url https://example.com \
-  --username admin \
-  --password secret
-
-# Run test
-node packages/cli/dist/index.js run myapp --headless
-
-# Check environment
-node packages/cli/dist/index.js doctor
+# 使用仓库内 CLI；发布为包后可直接使用 wta
+node packages/cli/bin/wta.js init .
+node packages/cli/bin/wta.js target add --name demo --url https://demoqa.com/text-box --username test --password test
+node packages/cli/bin/wta.js run demo --mode fresh --headless
 ```
 
-## Architecture
+默认 `run` 会提交到常驻代理。常用操作：
 
-```
-CLI (wta) ──> Orchestrator ──> Browser (Playwright)
-                 │
-                 ├── Perception: custom extraction script
-                 │   (DOM + CSS states + cursor:pointer clickability)
-                 │
-                 ├── Component Model: 2-layer classification
-                 │   (builtin rules + learned signatures)
-                 │
-                 ├── Quality Rules: 3-layer judgment
-                 │   (builtin + learned + LLM instant)
-                 │
-                 ├── Coverage Guarantee: 5 mechanisms
-                 │   (Frontier Queue, Component Revealer,
-                 │    Covering Array, Path Coverage, Report)
-                 │
-                 ├── Memory: app + cross-app + compression
-                 │
-                 └── Self-Healing: 3 levels
-                     (test recovery, agent recovery, code hot-patch)
+```bash
+wta gui                         # 启动 GUI 和常驻代理
+wta status --all                # 查看会话，包括历史会话
+wta attach <session-id>         # 在终端查看实时日志
+wta stop <session-id>           # 停止一个会话
+wta stop --all                  # 停止全部活动会话
+wta run demo --foreground       # 前台运行，便于本地调试
 ```
 
-## Run Modes
+## 重跑与发散
 
-| Mode | Command | Behavior |
-|------|---------|----------|
-| continue | `wta run myapp` | Skip passed items, test untested |
-| fresh | `wta run myapp --mode fresh` | Full retest from scratch |
-| retest | `wta run myapp --mode retest` | Retest everything including passed |
-| expand | `wta run myapp --mode expand` | Deeper combos, new paths, extreme inputs |
-| regression | `wta run myapp --mode regression` | Only retest historical bugs |
+| 模式 | 命令 | 行为 |
+|---|---|---|
+| `continue` | `wta run demo` | 继承已测项和记忆，只执行未完成项目 |
+| `fresh` | `wta run demo --mode fresh` | 清空目标记忆并重新探索、测试 |
+| `retest` | `wta run demo --mode retest` | 保留模型与经验，但重做全部动作 |
+| `expand` | `wta run demo --mode expand --phase combo` | 跳过已有成功动作，优先新增组合与路径 |
+| `regression` | `wta run demo --mode regression` | 聚焦历史失败项与问题区域 |
 
-## Key Design Decisions
+组合空间无限大时不存在数学意义上的“绝对穷尽”。本项目对小空间执行全组合；大空间执行有界 t-way 覆盖、路径覆盖和预算化发散。报告会分别列出动作、组合、路径的已覆盖、受阻和待覆盖数，不能用单一百分比掩盖边界。
 
-- **TypeScript, not Python**: Playwright's Node API is first-class; LLM does the reasoning remotely
-- **Custom agent loop, not LangChain**: Precise control over tokens and context
-- **Custom DOM extraction, not raw HTML or a11y-only**: Gets CSS states + precise selectors + form constraints
-- **node:sqlite, not better-sqlite3**: Zero native compilation required
-- **Bundled browsers**: vendor/browsers/ included, no runtime download needed
+## 登录与认证
 
-## Project Structure
+自动登录可处理普通用户名密码表单。检测到验证码或二次验证时，Agent 不会尝试绕过，改为要求人工取得合法状态：
 
-```
-packages/
-  core/          Agent core (browser, perception, cognition, testing, healing)
-  cli/           Command-line interface
-vendor/
-  browsers/      Bundled browser binaries
-plugins/         Local plugins
-.wta/            Runtime data (targets, sessions, reports, memory)
+```bash
+wta auth capture demo
+wta auth import demo ./storage-state.json
+wta auth export demo -o ./demo-auth-state.json
 ```
 
-## Coverage Guarantee
+认证状态保存在 `.wta/auth/<target>.json`；新会话优先加载该状态。
 
-The agent uses formal mechanisms to ensure test completeness:
+## 模型与扩展
 
-1. **Frontier Queue**: (page, component, action) queue empty = exploration exhausted
-2. **Component Revealer**: Expands accordions, switches tabs, opens modals before scanning
-3. **IPOG Covering Array**: Mathematical guarantee for pairwise/n-wise combination coverage
-4. **Path Coverage**: Tracks K-step interaction sequences
-5. **Coverage Report**: Precise report of what was tested and what wasn't
+模型按任务路由，文本推理和视觉分析可以配置不同模型：
 
-## License
+```bash
+wta model list
+wta model set quality-reasoning --provider custom --model your-reasoner --base-url https://example.test/v1
+wta model set visual-analysis --provider custom --model your-vision-model --base-url https://example.test/v1
+wta plugin create api-tester
+wta mcp list
+```
 
-MIT
+“本体/公理”在实现中不是独立的复杂推理系统。可迁移的通用知识以组件签名、质量规则和记忆模式存储；目标系统的实际事实以页面、组件、交互与导航图存储。两者均可从观察和会话结果积累，但通用规则需要置信度与证据，不能由模型任意改写。
+
+## 报告、日志与目录
+
+每个完成或失败会话都会在 `.wta/reports` 生成：
+
+- `report-<session>.md`：中文测试报告、问题清单、覆盖快照、代码自愈与时间线。
+- `report-<session>.json`：中文键名的机器可读结构化报告。
+
+运行数据位于 `.wta/`：目标配置、认证状态、会话、SQLite 数据库、报告、截图、视频和本地插件均只保留在本机。
+
+## 验证
+
+```bash
+pnpm build
+pnpm test
+```
+
+CI 对构建和四维覆盖率执行 100% 门禁。浏览器二进制由 Git LFS 管理，克隆时请启用 Git LFS。

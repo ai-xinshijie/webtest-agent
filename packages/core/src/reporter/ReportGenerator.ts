@@ -43,11 +43,14 @@ export class ReportGenerator {
     const testResults = this.db.prepare(`
       SELECT * FROM test_results WHERE session_id = ?
     `).all(sessionId) as any[];
+    const logs = this.getLogs(sessionId);
+    const progress = session.progress_json ? JSON.parse(session.progress_json) : null;
+    const hotPatches = this.getHotPatches(sessionId);
 
     if (this.options.format === 'json') {
-      return this.generateJSON(session, pages, components, bugs, testResults, this.getLogs(sessionId));
+      return this.generateJSON(session, pages, components, bugs, testResults, logs, progress, hotPatches);
     }
-    return this.generateMarkdown(session, pages, components, bugs, testResults, this.getLogs(sessionId));
+    return this.generateMarkdown(session, pages, components, bugs, testResults, logs, progress, hotPatches);
   }
 
   private getLogs(sessionId: string): any[] {
@@ -59,6 +62,12 @@ export class ReportGenerator {
     `).all(sessionId) as any[]).map(row => JSON.parse(row.log_json));
   }
 
+  private getHotPatches(sessionId: string): any[] {
+    return (this.db.prepare(`
+      SELECT report_json FROM hot_patch_reports WHERE session_id = ? ORDER BY created_at ASC
+    `).all(sessionId) as Array<{ report_json: string }>).map(row => JSON.parse(row.report_json));
+  }
+
   private generateMarkdown(
     session: any,
     pages: any[],
@@ -66,6 +75,8 @@ export class ReportGenerator {
     bugs: any[],
     testResults: any[],
     logs: any[],
+    progress: any,
+    hotPatches: any[],
   ): string {
     const duration = session.ended_at ? ((session.ended_at - session.started_at) / 1000).toFixed(1) : 'N/A';
     const reportTime = new Date().toISOString();
@@ -106,6 +117,7 @@ export class ReportGenerator {
     for (const [type, count] of typeCounts) {
       md += `- ${this.translateComponentType(type)}：${count} 个\n`;
     }
+    md += `\n### 深度覆盖\n\n${this.coverageMarkdown(progress)}`;
 
     if (bugs.length > 0) {
       md += `\n## 问题列表（${bugs.length} 个）\n\n`;
@@ -126,10 +138,30 @@ export class ReportGenerator {
       md += `\n## 问题列表\n\n本次测试未发现问题。\n\n`;
     }
 
+    const failedResults = testResults.filter(result => result.status === 'failed');
+    if (failedResults.length > 0) {
+      md += `## 执行异常（${failedResults.length} 条）\n\n`;
+      md += '以下记录表示测试执行未能完成，不会自动归类为产品缺陷；请结合输入、错误证据和执行时间线复现判断。\n\n';
+      for (let index = 0; index < failedResults.length; index++) {
+        const result = failedResults[index];
+        md += `### 执行异常 ${index + 1}：${result.test_type}\n\n- **耗时**：${result.duration_ms ?? 0} 毫秒\n- **输入**：\`${result.input_json ?? '{}'}\`\n- **错误证据**：\`${result.output_json ?? '{}'}\`\n\n`;
+      }
+    }
+
     if (testResults.length > 0) {
       md += `## 测试结果（${testResults.length} 条）\n\n| 测试类型 | 状态 | 耗时 |\n|----------|------|------|\n`;
       for (const tr of testResults) {
         md += `| ${tr.test_type} | ${this.translateStatus(tr.status)} | ${tr.duration_ms ?? 0} 毫秒 |\n`;
+      }
+    }
+
+    md += `\n## 代码自愈\n\n`;
+    if (hotPatches.length === 0) {
+      md += '本次会话未触发代码级自愈。\n';
+    } else {
+      md += '| 策略 | 状态 | 根因 | 说明 |\n|------|------|------|------|\n';
+      for (const patch of hotPatches) {
+        md += `| ${patch.strategyName} | ${this.translateHotPatchStatus(patch.status)} | ${patch.rootCause} | ${patch.explanation} |\n`;
       }
     }
 
@@ -152,6 +184,8 @@ export class ReportGenerator {
     bugs: any[],
     testResults: any[],
     logs: any[],
+    progress: any,
+    hotPatches: any[],
   ): string {
     return JSON.stringify({
       会话: {
@@ -171,6 +205,7 @@ export class ReportGenerator {
           return acc;
         }, {}),
       },
+      深度覆盖: progress?.coverage ?? null,
       问题列表: bugs.map(b => ({
         标识: b.id,
         严重级别: this.translateSeverity(b.severity),
@@ -180,11 +215,18 @@ export class ReportGenerator {
         质量规则: b.rule_id,
         发现时间: b.detected_at,
       })),
+      执行异常: testResults.filter(tr => tr.status === 'failed').map(tr => ({
+        测试类型: tr.test_type,
+        耗时毫秒: tr.duration_ms,
+        输入: tr.input_json ? JSON.parse(tr.input_json) : null,
+        错误证据: tr.output_json ? JSON.parse(tr.output_json) : null,
+      })),
       测试结果: testResults.map(tr => ({
         测试类型: tr.test_type,
         状态: this.translateStatus(tr.status),
         耗时毫秒: tr.duration_ms,
         输入: tr.input_json ? JSON.parse(tr.input_json) : null,
+        输出: tr.output_json ? JSON.parse(tr.output_json) : null,
       })),
       执行时间线: logs.map(log => ({
         序号: log.sequence,
@@ -196,6 +238,7 @@ export class ReportGenerator {
         结果: log.result,
         上下文: log.context,
       })),
+      代码自愈: hotPatches,
     }, null, 2);
   }
 
@@ -220,7 +263,7 @@ export class ReportGenerator {
 
   private translateStatus(status: string): string {
     const map: Record<string, string> = {
-      running: '运行中', completed: '已完成', failed: '失败', paused: '已暂停',
+      running: '运行中', completed: '已完成', success: '成功', failed: '失败', paused: '已暂停',
       passed: '通过', failed_test: '未通过', skipped: '已跳过', warning: '警告',
     };
     return map[status] ?? status;
@@ -257,5 +300,31 @@ export class ReportGenerator {
       unknown: '未知组件',
     };
     return map[type] ?? type;
+  }
+
+  private coverageMarkdown(progress: any): string {
+    const coverage = progress?.coverage;
+    if (!coverage) return '本次会话尚未生成深度覆盖快照。\n';
+
+    const actions = coverage.actions;
+    const actionTotal = actions.visited + actions.blocked + actions.pending;
+    let markdown = '| 维度 | 已执行 | 受阻 | 待覆盖 | 总数 | 覆盖率 |\n|------|--------|------|--------|------|--------|\n';
+    markdown += `| 动作 | ${actions.visited} | ${actions.blocked} | ${actions.pending} | ${actionTotal} | ${Number(actions.percentage ?? 0).toFixed(2)}% |\n`;
+
+    for (const [name, item] of [['组合', coverage.combinations], ['路径', coverage.paths]] as const) {
+      markdown += `| ${name} | ${item.covered} | 0 | ${Math.max(0, item.total - item.covered)} | ${item.total} | ${Number(item.percentage ?? 0).toFixed(2)}% |\n`;
+    }
+    return `${markdown}\n动作覆盖率将已执行和已确认受阻的动作计入已解析覆盖；受阻项保留在报告中，便于后续解除条件后重测。\n`;
+  }
+
+  private translateHotPatchStatus(status: string): string {
+    const map: Record<string, string> = {
+      'fallback-applied': '已切换降级策略',
+      proposed: '待人工审核',
+      applied: '已应用',
+      rejected: '已拒绝',
+      'rolled-back': '已回滚',
+    };
+    return map[status] ?? status;
   }
 }

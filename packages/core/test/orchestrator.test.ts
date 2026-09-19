@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -323,6 +323,21 @@ describe('Orchestrator', () => {
       .rejects.toThrow('自动登录失败：账号密码错误');
     const row = db.prepare(`SELECT status FROM sessions WHERE id = 'login-failed'`).get() as any;
     expect(row.status).toBe('failed');
+    expect(mocks.saveReport).toHaveBeenCalledTimes(2);
+    await orchestrator.close();
+  });
+
+  it('检测到人工认证要求时提供认证状态命令并保存失败报告', async () => {
+    insertTarget();
+    mocks.login.mockResolvedValueOnce({
+      success: false, performed: false, requiresManual: true, reason: '检测到验证码，需要人工认证后导入登录状态',
+    });
+    mocks.saveReport.mockImplementationOnce(() => { throw '报告目录不可写'; }).mockReturnValue('report.json');
+    const orchestrator = new Orchestrator(createConfig());
+    await expect(orchestrator.run(createTarget(), { sessionId: 'manual-auth' }))
+      .rejects.toThrow('wta auth capture demo');
+    const timeline = orchestrator.getTimeline('manual-auth');
+    expect(timeline.some(item => item.result.error === '报告目录不可写')).toBe(true);
     await orchestrator.close();
   });
 
@@ -477,7 +492,7 @@ describe('Orchestrator', () => {
       },
     }]);
     expect(merged.executedActions).toBe(2);
-    expect(merged.coverage.actions.percentage).toBe(50);
+    expect(merged.coverage.actions.percentage).toBe(75);
     expect(merged.coverage.combinations.percentage).toBeCloseTo(66.67);
     await orchestrator.close();
   });
@@ -522,6 +537,28 @@ describe('Orchestrator', () => {
     await orchestrator.close();
   });
 
+  it('测试后页面感知超时时记录告警并仍然完成会话', async () => {
+    insertTarget();
+    insertPage('page-1', '/page');
+    mocks.capture.mockImplementationOnce(() => new Promise(() => {}));
+    const orchestrator = new Orchestrator(createConfig({
+      timeout: { navigation: 10, action: 1000, screenshot: 1000 },
+    }));
+
+    const session = await orchestrator.run(createTarget(), { sessionId: 'capture-timeout' });
+    expect(session.status).toBe('completed');
+    expect(session.logger?.getTimeline().some(log => log.action.type === 'quality-rule-skip')).toBe(true);
+    expect(session.logger?.getTimeline().some(log => log.result.error?.includes('结构化页面提取超时：10ms'))).toBe(true);
+    await orchestrator.close();
+  });
+
+  it('感知辅助方法在正常响应时清除计时器并返回观察结果', async () => {
+    const orchestrator = new Orchestrator(createConfig()) as any;
+    mocks.capture.mockResolvedValueOnce(mocks.observation);
+    await expect(orchestrator.captureWithTimeout(mocks.page, 1000)).resolves.toEqual(mocks.observation);
+    await orchestrator.close();
+  });
+
   it('根据配置和系统判断无头模式', async () => {
     const auto = new Orchestrator(createConfig({ headless: 'auto' })) as any;
     const headless = new Orchestrator(createConfig({ headless: true })) as any;
@@ -542,6 +579,123 @@ describe('Orchestrator', () => {
     await expect(orchestrator.stop('missing')).rejects.toThrow('未找到测试会话：missing');
     await expect(orchestrator.pause('missing')).rejects.toThrow('未找到测试会话：missing');
     await expect(orchestrator.resume('missing')).rejects.toThrow('未找到测试会话：missing');
+    await orchestrator.close();
+  });
+
+  it('编排器的日志器缺失、非浏览器异常和重启上限均明确失败', async () => {
+    const orchestrator = new Orchestrator(createConfig()) as any;
+    const target = createTarget();
+    const withoutLogger = { id: 'missing-logger', targetId: 'demo', phase: 'login', restartCount: 0 };
+    await expect(orchestrator.agentLoop(withoutLogger, target, {}, 'continue')).rejects.toThrow('会话日志器尚未初始化');
+    await expect(orchestrator.finalizeSession(withoutLogger, mocks.page, {})).rejects.toThrow('会话日志器尚未初始化');
+    await expect(orchestrator.runQualityRules(withoutLogger, mocks.observation)).rejects.toThrow('会话日志器尚未初始化');
+
+    const session = { ...withoutLogger, logger: { logSystem: vi.fn() }, restartCount: 2 };
+    orchestrator.agentLoop = vi.fn(async () => { throw 'Connection closed'; });
+    await expect(orchestrator.executeWithRecovery(session, target, {}, 'continue')).rejects.toBe('Connection closed');
+    session.restartCount = 0;
+    orchestrator.agentLoop = vi.fn(async () => { throw new Error('业务失败'); });
+    await expect(orchestrator.executeWithRecovery(session, target, {}, 'continue')).rejects.toThrow('业务失败');
+    await orchestrator.close();
+  });
+
+  it('显式无头、会话认证状态、截图失败和标准深度探索均可完整编排', async () => {
+    insertTarget();
+    insertPage('page-1', '/page');
+    mkdirSync(path.join(tempDir, '.wta', 'sessions'), { recursive: true });
+    mkdirSync(path.join(tempDir, '.wta', 'auth'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'sessions', 'fallbacks.json'), '{}');
+    writeFileSync(path.join(tempDir, '.wta', 'auth', 'demo.json'), '{}');
+    mocks.screenshot.mockResolvedValue(undefined);
+    const orchestrator = new Orchestrator(createConfig());
+    const session = await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, depth: 'standard' } }), {
+      sessionId: 'fallbacks', phase: 'test', headless: false, parallel: 0,
+    });
+    expect(session.status).toBe('completed');
+    expect(mocks.createContext).toHaveBeenCalledWith('fallbacks', expect.objectContaining({ headless: false, storageStatePath: expect.stringContaining('sessions') }));
+    expect(session.logger?.getTimeline().filter(log => log.action.type === 'screenshot').every(log => log.result.status === 'warning')).toBe(true);
+    await orchestrator.close();
+  });
+
+  it('质量规则、报告和组件模型对缺省字段与文本异常保留中文证据', async () => {
+    insertTarget();
+    const orchestrator = new Orchestrator(createConfig()) as any;
+    orchestrator.currentTargetId = 'demo';
+    const component = { ...mocks.observation.components[0], selector: null, text: null, ariaLabel: null, testId: null, required: false, maxLength: 0, pattern: '' };
+    const model = orchestrator.buildComponentModel({ ...mocks.observation, components: [component] });
+    expect(model.components[0]).toMatchObject({ selector: 'button', label: 'unknown', constraints: [] });
+
+    const logger = new AgentLogger(db, 'quality-text', { consoleOutput: false });
+    db.prepare(`INSERT INTO sessions (id, target_id, status, started_at, phase) VALUES ('quality-text', 'demo', 'running', 1, 'test')`).run();
+    const session = { id: 'quality-text', targetId: 'demo', logger };
+    const rule = BUILTIN_RULES.find(item => item.id === 'QR006')!;
+    const spy = vi.spyOn(rule, 'check').mockRejectedValueOnce('规则文本失败');
+    await orchestrator.runQualityRules(session, mocks.observation);
+    spy.mockRestore();
+    expect(logger.getTimeline().some((log: any) => log.result.error === '规则文本失败')).toBe(true);
+
+    mocks.saveReport.mockImplementationOnce(() => { throw '报告文本失败'; }).mockReturnValue('ok.json');
+    const paths = orchestrator.saveReports({ id: 'quality-text' }, logger);
+    expect(paths).toEqual(['ok.json']);
+    expect(logger.getTimeline().some((log: any) => log.result.error === '报告文本失败')).toBe(true);
+    await orchestrator.close();
+  });
+
+  it('会话标识、认证状态回退与文本异常均保留可恢复审计', async () => {
+    insertTarget();
+    insertPage('page-1', '/page');
+    mkdirSync(path.join(tempDir, '.wta', 'auth'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'auth', 'demo.json'), '{}');
+    mocks.login.mockResolvedValueOnce({ success: false, performed: true });
+    const orchestrator = new Orchestrator(createConfig({ parallel: 3 }));
+    await expect(orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, parallel: undefined as any } }), { phase: 'test' }))
+      .rejects.toThrow('自动登录失败：未知原因');
+    const failed = [...(orchestrator.getStatus() as Map<string, any>).values()][0];
+    expect(failed.id).toBeTruthy();
+    expect(mocks.createContext).toHaveBeenCalledWith(failed.id, expect.objectContaining({ storageStatePath: expect.stringContaining('auth') }));
+
+    const logger = new AgentLogger(db, failed.id, { consoleOutput: false });
+    const session = { id: failed.id, targetId: 'demo', startedAt: 1, phase: 'test', status: 'running', logger };
+    (orchestrator as any).codeHealer = { recover: vi.fn(async () => ({ id: 'repair', strategyName: 'x', status: 'rejected', createdAt: 1, rootCause: 'x', explanation: 'x' })), getReports: vi.fn(() => []) };
+    (orchestrator as any).executeWithRecovery = vi.fn(async () => { throw '文本会话异常'; });
+    await expect(orchestrator.run(createTarget(), { sessionId: 'text-error' })).rejects.toBe('文本会话异常');
+    await orchestrator.close();
+  });
+
+  it('质量规则和页面感知的缺省网络日志与同步异常均可降级', async () => {
+    insertTarget();
+    db.prepare(`INSERT INTO sessions (id, target_id, status, started_at, phase) VALUES ('sync-capture', 'demo', 'running', 1, 'test')`).run();
+    const orchestrator = new Orchestrator(createConfig()) as any;
+    const logger = new AgentLogger(db, 'sync-capture', { consoleOutput: false });
+    const session = { id: 'sync-capture', targetId: 'demo', logger };
+    await orchestrator.runQualityRules(session, { ...mocks.observation, networkEvents: undefined });
+    orchestrator.perceiver = { capture: () => { throw new Error('同步感知失败'); } };
+    await expect(orchestrator.captureWithTimeout(mocks.page, 10)).rejects.toThrow('同步感知失败');
+    await orchestrator.close();
+  });
+
+  it('探索阶段映射 quick 与 standard 深度，并从配置继承并行数', async () => {
+    insertTarget();
+    insertPage('page-1', '/page-1');
+    insertPage('page-2', '/page-2');
+    insertPage('page-3', '/page-3');
+    const orchestrator = new Orchestrator(createConfig({ parallel: 3 }));
+    await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, depth: 'standard' } }), { sessionId: 'explore-standard', phase: 'explore' });
+    expect(mocks.explore).toHaveBeenCalled();
+
+    await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, depth: 'quick' } }), { sessionId: 'explore-quick', phase: 'explore' });
+    await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, parallel: undefined as any } }), { sessionId: 'parallel-config', phase: 'test' });
+    expect(mocks.createContext).toHaveBeenCalledWith('parallel-config:worker-2', expect.anything());
+    await orchestrator.close();
+  });
+
+  it('测试后页面提取的文本异常记录为质量规则跳过警告', async () => {
+    insertTarget();
+    insertPage('page-1', '/page');
+    mocks.capture.mockRejectedValueOnce('页面状态文本异常');
+    const orchestrator = new Orchestrator(createConfig());
+    const session = await orchestrator.run(createTarget(), { sessionId: 'capture-text-error' });
+    expect(session.logger?.getTimeline().some(log => log.result.error === '页面状态文本异常')).toBe(true);
     await orchestrator.close();
   });
 });

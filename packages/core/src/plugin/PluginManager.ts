@@ -79,7 +79,7 @@ export class PluginManager {
     try {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as PluginManifest;
     } catch (error) {
-      throw new Error(`插件清单解析失败：${pluginPath}，${error instanceof Error ? error.message : error}`);
+      throw new Error(`插件清单解析失败：${pluginPath}，${String(error).replace(/^Error: /, '')}`);
     }
 
     this.validateManifest(manifest);

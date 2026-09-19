@@ -206,4 +206,50 @@ describe('InteractionExecutor 动作分支', () => {
       placeholder: null,
     }), '北京')).rejects.toThrow('No selector for component: input');
   });
+
+  it('字段值生成覆盖空值、特殊类型、长度约束与字段名回退', () => {
+    const executor = new InteractionExecutor() as any;
+    expect(executor.generateTestValue(createComponent(), 'empty')).toBe('');
+    expect(executor.getValidValue(createComponent({ type: 'number' }))).toBe('42');
+    expect(executor.getValidValue(createComponent({ type: 'password' }))).toBe('TestPass123!');
+    expect(executor.getValidValue(createComponent({ type: 'date' }))).toBe('2024-01-15');
+    expect(executor.getValidValue(createComponent({ tag: 'textarea', type: undefined }))).toContain('automated testing');
+    expect(executor.getInvalidValue(createComponent({ maxLength: 2, type: undefined }))).toHaveLength(102);
+    expect(executor.getBoundaryValue(createComponent({ maxLength: 2 }))).toBe('aa');
+    expect(executor.getFieldName(createComponent({ text: undefined, ariaLabel: null, placeholder: null, testId: 'field-id' }))).toBe('field-id');
+    expect(executor.isFormField(createComponent({ tag: 'div', role: 'textbox' }))).toBe(true);
+    expect(executor.isFormField(createComponent({ tag: 'div', role: 'generic' }))).toBe(false);
+  });
+
+  it('缺少选择器、单选下拉和字段名称回退保持可预期行为', async () => {
+    const executor = new InteractionExecutor() as any;
+    const page = createActionPage();
+    (page.locator as any).mockReturnValue({ locator: vi.fn(() => ({ count: vi.fn(async () => 1) })) });
+    const noSelector = createComponent({ selector: null, id: null, testId: null, ariaLabel: null, placeholder: null });
+    await expect(executor.fill(page, noSelector, '值')).rejects.toThrow('组件没有可用选择器');
+    await expect(executor.click(page, noSelector)).rejects.toThrow('组件没有可用选择器');
+    await executor.executeAction(page, createComponent(), 'select-random');
+    expect(page.selectOption).toHaveBeenLastCalledWith('#component', { index: 0 }, { timeout: 5000 });
+    expect(executor.getFieldName(createComponent({ text: undefined, ariaLabel: null, placeholder: null, testId: undefined }))).toBe('input');
+  });
+
+  it('空文本字段和缺省类型按默认值及标签回退填充', async () => {
+    const executor = new InteractionExecutor() as any;
+    const page = createBasePage();
+    const field = createComponent({ text: undefined, ariaLabel: null, placeholder: null, type: undefined });
+    await executor.fillForm(page, [field], 'valid');
+    expect(page.fill).toHaveBeenCalledWith('#component', 'Test Value', { timeout: 5000 });
+    expect(executor.getValidValue(createComponent({ text: undefined, ariaLabel: null, placeholder: null, type: 'tel' }))).toBe('13800138000');
+    expect(executor.getValidValue(createComponent({ text: undefined, ariaLabel: null, placeholder: null, type: 'url' }))).toBe('https://example.com');
+  });
+
+  it('字段值生成器允许跳过无值字段并覆盖 placeholder 标签回退', async () => {
+    const executor = new InteractionExecutor() as any;
+    const page = createBasePage();
+    const field = createComponent({ text: undefined, ariaLabel: null, placeholder: '提示', type: 'text' });
+    vi.spyOn(executor, 'generateTestValue').mockReturnValueOnce(undefined);
+    await expect(executor.fillForm(page, [field], 'valid')).resolves.toEqual({});
+    expect(page.fill).not.toHaveBeenCalled();
+    expect(executor.getFieldName(field)).toBe('提示');
+  });
 });

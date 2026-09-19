@@ -97,7 +97,7 @@ describe('CoverageGuarantee', () => {
 
     const snapshot = tracker.snapshot();
     expect(tracker.isExhausted()).toBe(true);
-    expect(snapshot.actions).toEqual({ visited: 2, blocked: 1, pending: 0, percentage: 66.66666666666666 });
+    expect(snapshot.actions).toEqual({ visited: 2, blocked: 1, pending: 0, percentage: 100 });
     expect(snapshot.combinations).toEqual({ covered: 1, total: 2, percentage: 50 });
     expect(snapshot.paths).toEqual({ covered: 1, total: 2, percentage: 50 });
   });
@@ -107,6 +107,59 @@ describe('CoverageGuarantee', () => {
     expect(snapshot.actions.percentage).toBe(100);
     expect(snapshot.combinations.percentage).toBe(100);
     expect(snapshot.paths.percentage).toBe(100);
+  });
+
+  it('处理退化强度、有限路径和重复覆盖记录', () => {
+    const generator = new CoveringArrayGenerator();
+    const single = generator.generate([['a', 'b']], 0);
+    expect(single).toMatchObject({ strength: 1, exhaustive: false, totalCombinations: 2 });
+    expect(generator.generate([['a'], ['b']], 0, 1).rows).toEqual([['a', 'b']]);
+
+    const paths = new PathCoverageGenerator().generate({
+      nodes: ['a', 'b', 'c'],
+      edges: [{ from: 'a', to: 'b' }, { from: 'a', to: 'c' }, { from: 'b', to: 'a' }],
+    }, 4, 1);
+    expect(paths).toEqual([['a', 'c']]);
+
+    const tracker = new CoverageTracker();
+    tracker.initializeActions([{ pageId: 'p', componentId: 'c', action: 'click' }]);
+    tracker.markVisited('p', 'c', 'click');
+    tracker.markBlocked('p', 'c', 'click');
+    tracker.initializeActions([{ pageId: 'p', componentId: 'c', action: 'click' }]);
+    tracker.recordCombination(['a']);
+    tracker.recordCombination(['a']);
+    tracker.recordPath(['a', 'b']);
+    tracker.recordPath(['a', 'b']);
+    tracker.setExpectedCombinations(1);
+    tracker.setExpectedPaths(1);
+    expect(tracker.snapshot()).toMatchObject({
+      actions: { visited: 1, pending: 0 },
+      combinations: { covered: 1 },
+      paths: { covered: 1 },
+    });
+  });
+
+  it('覆盖数组跳过已覆盖赋值，路径在最大深度时保存路径', () => {
+    const generator = new CoveringArrayGenerator() as any;
+    expect(generator.covers(['a', 'b'], [{ factorIndex: 0, value: 'a' }])).toBe(true);
+    expect(generator.covers(['a', 'b'], [{ factorIndex: 0, value: 'x' }])).toBe(false);
+    const paths = new PathCoverageGenerator().generate({
+      nodes: ['a', 'b', 'c'], edges: [{ from: 'a', to: 'b' }, { from: 'b', to: 'c' }],
+    }, 3);
+    expect(paths).toContainEqual(['a', 'b', 'c']);
+  });
+
+  it('覆盖数组跳过重复行，最浅路径不生成单节点记录', () => {
+    const result = new CoveringArrayGenerator().generate([['a', 'a'], ['b']], 1, 0);
+    expect(result.rows).toEqual([['a', 'b']]);
+    expect(new PathCoverageGenerator().generate({ nodes: ['a'], edges: [{ from: 'a', to: 'a' }] }, 1)).toEqual([]);
+  });
+
+  it('组合索引生成器处理零大小和超过元素数量的请求', () => {
+    const generator = new CoveringArrayGenerator() as any;
+    expect(generator.combineIndexes(['a', 'b'], 0)).toEqual([[]]);
+    expect(generator.combineIndexes(['a'], 2)).toEqual([]);
+    expect(generator.combineIndexes(['a', 'b'], 1)).toEqual([['a'], ['b']]);
   });
 });
 
@@ -223,6 +276,80 @@ describe('MemoryManager', () => {
     await expect(manager.compressSession('不存在')).rejects.toThrow('未找到测试会话：不存在');
     db.close();
   });
+
+  it('保留本地摘要、导入全部记忆并清理指定目标', async () => {
+    const { db, manager } = createFullMemory();
+    manager.markTested('demo', {
+      itemKey: 'demo:button-1:click', componentId: 'button-1', testType: 'click', status: 'failed',
+    });
+    expect(manager.getTestedItems('demo')[0]?.testCount).toBe(2);
+    expect(manager.getTestedStatus('demo', 'missing')).toBeNull();
+
+    const fallback = await manager.compressSession('session-1');
+    const arrayResult = await manager.compressSession('session-1', {
+      llm: { call: vi.fn(async () => '[]') } as any,
+    });
+    const rejected = await manager.compressSession('session-1', {
+      llm: { call: vi.fn(async () => { throw '模型不可用'; }) } as any,
+    });
+    expect(fallback.summary.结论).toBe('已生成本地结构化摘要');
+    expect(arrayResult.summary.结论).toBe('已生成本地结构化摘要');
+    expect(rejected.summary.模型压缩失败原因).toBe('模型不可用');
+
+    const exported = manager.export();
+    expect(exported.summaries).toHaveLength(3);
+    const importedDir = mkdtempSync(path.join(tmpdir(), 'wta-memory-full-'));
+    const imported = createManager(importedDir);
+    expect(imported.manager.import(exported)).toBe(6);
+    imported.manager.clearTestedItems();
+    expect(imported.manager.getOverview().testedItemCount).toBe(0);
+    imported.manager.clear('demo');
+    expect(imported.manager.getOverview()).toMatchObject({ ruleCount: 0, patternCount: 0, summaryCount: 0 });
+    imported.db.close();
+    rmSync(importedDir, { recursive: true, force: true });
+    db.close();
+  });
+
+  it('记忆摘要支持 fenced JSON、非对象 JSON 与最新测试项合并', async () => {
+    const { db, manager } = createManager();
+    const fence = String.fromCharCode(96).repeat(3);
+    const fenced = await manager.compressSession('session-1', {
+      llm: { call: vi.fn(async () => [fence + 'json', '{"结论":"围栏摘要"}', fence].join('\n')) } as any,
+    });
+    expect(fenced.summary).toEqual({ 结论: '围栏摘要' });
+    const fallback = await manager.compressSession('session-1', {
+      llm: { call: vi.fn(async () => 'null') } as any,
+    });
+    expect(fallback.summary.结论).toBe('已生成本地结构化摘要');
+
+    const exported = manager.export('demo');
+    const newer = { ...exported, testedItems: [{
+      targetId: 'demo', itemKey: 'x', componentId: 'x', testType: 'click', status: 'passed' as const, lastTestedAt: 2, testCount: 1,
+    }] };
+    const older = { ...newer, testedItems: [{ ...newer.testedItems[0]!, lastTestedAt: 1, status: 'failed' as const }] };
+    expect(manager.merge([newer, older]).testedItems[0]?.status).toBe('passed');
+    db.close();
+  });
+
+  it('压缩包含审计日志的会话并覆盖日志映射', async () => {
+    const { db, manager } = createManager();
+    db.prepare(`
+      INSERT INTO agent_logs (id, session_id, timestamp, sequence, source, log_json, created_at)
+      VALUES ('log-1', 'session-1', 1, 1, 'script', '{"source":"script"}', 1)
+    `).run();
+    const summary = await manager.compressSession('session-1');
+    expect(summary.summary.审计日志条数).toBe(1);
+    db.close();
+  });
+
+  it('模型压缩抛出 Error 时保留错误消息', async () => {
+    const { db, manager } = createManager();
+    const summary = await manager.compressSession('session-1', {
+      llm: { call: vi.fn(async () => { throw new Error('模型错误'); }) } as any,
+    });
+    expect(summary.summary.模型压缩失败原因).toBe('模型错误');
+    db.close();
+  });
 });
 
 describe('ConfigManager', () => {
@@ -278,6 +405,40 @@ describe('ConfigManager', () => {
     expect(new ConfigManager(tempDir).load()).toMatchObject({ defaultBrowser: 'firefox' });
     manager.saveTarget({ ...target, url: 'https://example.com/home' });
     expect(manager.loadTarget('演示').url).toBe('https://example.com/home');
+  });
+
+  it('浏览器嵌套配置缺省时依次使用顶层和默认配置', () => {
+    mkdirSync(path.join(tempDir, '.wta'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'config.json'), JSON.stringify({
+      browser: { defaultBrowser: 'webkit' },
+      headless: false,
+      viewport: { width: 800, height: 600 },
+      parallel: 7,
+    }), 'utf-8');
+    const config = new ConfigManager(tempDir).load();
+    expect(config.defaultBrowser).toBe('webkit');
+    expect(config.headless).toBe(false);
+    expect(config.viewport).toEqual({ width: 800, height: 600 });
+    expect(config.parallel).toBe(7);
+  });
+
+  it('浏览器嵌套配置完整时优先覆盖顶层同名字段', () => {
+    mkdirSync(path.join(tempDir, '.wta'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'config.json'), JSON.stringify({
+      defaultBrowser: 'chromium', headless: true, viewport: { width: 1, height: 1 }, parallel: 1,
+      browser: { defaultBrowser: 'firefox', headless: false, viewport: { width: 1280, height: 720 }, parallel: 4 },
+    }), 'utf-8');
+    expect(new ConfigManager(tempDir).load()).toMatchObject({
+      defaultBrowser: 'firefox', headless: false, viewport: { width: 1280, height: 720 }, parallel: 4,
+    });
+  });
+
+  it('配置文件字段缺失时回退到运行时默认值', () => {
+    mkdirSync(path.join(tempDir, '.wta'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'config.json'), JSON.stringify({}), 'utf-8');
+    const config = new ConfigManager(tempDir).load();
+    expect(config.defaultBrowser).toBe('chromium');
+    expect(config.viewport).toEqual({ width: 1920, height: 1080 });
   });
 
   it('目标列表按名称排序', () => {
@@ -376,6 +537,15 @@ describe('ComponentRevealer', () => {
     expect(result.revealedComponents).toBe(2);
     expect(logger.getTimeline().some(log => log.action.type === 'reveal')).toBe(true);
     db.close();
+  });
+
+  it('组件揭示器可在创建后注入日志器', async () => {
+    const { page } = createRevealPage();
+    const logger = { runScript: vi.fn(async (_trigger: unknown, _action: unknown, execute: () => unknown) => execute()) };
+    const revealer = new ComponentRevealer();
+    revealer.setLogger(logger as never);
+    await revealer.reveal(page, { phase: 'explore' });
+    expect(logger.runScript).toHaveBeenCalled();
   });
 });
 

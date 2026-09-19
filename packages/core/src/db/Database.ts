@@ -198,6 +198,15 @@ CREATE TABLE IF NOT EXISTS agent_logs (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS hot_patch_reports (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  strategy_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  report_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_components_page ON components(page_id);
 DELETE FROM components WHERE id NOT IN (
   SELECT MIN(id) FROM components GROUP BY target_id, page_id, selector
@@ -214,6 +223,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_navigation_edges_unique ON navigation_edge
 CREATE INDEX IF NOT EXISTS idx_memory_tested ON memory_tested_items(target_id);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
+CREATE INDEX IF NOT EXISTS idx_hot_patch_reports_session ON hot_patch_reports(session_id, created_at);
 `;
 
 export class DatabaseManager {
@@ -225,6 +235,7 @@ export class DatabaseManager {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     this.db = new DatabaseSync(dbPath);
+    this.db.exec('PRAGMA busy_timeout = 5000');
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA foreign_keys = ON');
     this.db.exec(SCHEMA);

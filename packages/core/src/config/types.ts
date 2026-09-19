@@ -110,6 +110,12 @@ export function createDefaultConfig(rootDir: string): AgentConfig {
         temperature: 0,
         maxTokens: 1000,
       },
+      'code-repair': {
+        provider: 'openai',
+        model: 'o1',
+        temperature: 0,
+        maxTokens: 3000,
+      },
     },
     logLevel: 'info',
   };

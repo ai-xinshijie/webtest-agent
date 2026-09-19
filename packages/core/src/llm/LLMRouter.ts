@@ -100,7 +100,7 @@ export class LLMRouter {
     }
 
     const data = await response.json() as any;
-    return data.choices[0]?.message?.content ?? '';
+    return data.choices?.[0]?.message?.content ?? '';
   }
 
   private async callAnthropic(

@@ -30,6 +30,7 @@ vi.mock('playwright', () => ({
 import { BrowserManager } from '../src/browser/BrowserManager.js';
 
 let tempDir = '';
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-browser-'));
@@ -43,6 +44,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  Object.defineProperty(process, 'platform', platformDescriptor);
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = '';
 });
@@ -96,6 +98,7 @@ describe('BrowserManager', () => {
   });
 
   it('支持递归查找 Linux 可执行文件', () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
     const executable = createExecutable(path.join('chromium-1208', '1', '2', '3', '4', '5', 'chrome'));
     const manager = new BrowserManager(tempDir);
 
@@ -164,12 +167,46 @@ describe('BrowserManager', () => {
     await expect(manager.createPage('session-1')).rejects.toThrow('未找到会话的浏览器上下文：session-1');
   });
 
+  it('上下文加载已存在状态文件并使用默认视频目录', async () => {
+    createExecutable('chrome.exe');
+    const statePath = createExecutable('state.json');
+    const manager = new BrowserManager(tempDir);
+    const browser = mocks.browser as unknown as { newContext: typeof mocks.chromiumLaunch };
+    browser.newContext = vi.fn(async () => mocks.context);
+    await manager.createContext('stateful', { storageStatePath: statePath, recordVideo: true });
+    expect(browser.newContext).toHaveBeenCalledWith(expect.objectContaining({
+      storageState: statePath,
+      recordVideo: { dir: path.join(process.cwd(), '.wta', 'videos') },
+    }));
+  });
+
   it('跳过没有可执行文件的匹配目录', () => {
     mkdirSync(path.join(tempDir, 'chromium-a-empty'), { recursive: true });
-    createExecutable(path.join('chromium-b', 'chrome'));
+    createExecutable(path.join('chromium-b', 'chrome.exe'));
     const manager = new BrowserManager(tempDir);
 
     expect(manager.isBrowserAvailable('chromium')).toBe(true);
+  });
+
+  it('匹配目录没有可执行文件时继续查找后续目录', () => {
+    const manager = new BrowserManager(tempDir) as any;
+    const first = createExecutable(path.join('chromium-one', 'chrome.exe'));
+    const second = createExecutable(path.join('chromium-two', 'chrome.exe'));
+    const original = manager.findExecutable.bind(manager);
+    let calls = 0;
+    manager.findExecutable = (...args: unknown[]) => {
+      calls++;
+      return calls === 2 ? null : original(...args);
+    };
+    expect(manager.getExecutablePath('chromium', false)).toBe(second);
+    expect(first).toBeTruthy();
+  });
+
+  it('匹配目录未发现任何可执行文件时返回不可用', () => {
+    mkdirSync(path.join(tempDir, 'chromium-empty'), { recursive: true });
+    const manager = new BrowserManager(tempDir) as any;
+    vi.spyOn(manager, 'findExecutable').mockReturnValue(null);
+    expect(manager.getExecutablePath('chromium', false)).toBeNull();
   });
 
   it('缺少浏览器时返回中文错误', async () => {
@@ -201,6 +238,17 @@ describe('BrowserManager', () => {
 
     await expect(manager.close()).resolves.toBeUndefined();
     expect(manager.isAlive()).toBe(false);
+    expect(manager.getSessionIds()).toEqual([]);
+  });
+
+  it('关闭单个会话时忽略上下文关闭异常', async () => {
+    createExecutable('chrome.exe');
+    const manager = new BrowserManager(tempDir);
+    const browser = mocks.browser as unknown as { newContext: typeof mocks.chromiumLaunch };
+    browser.newContext = vi.fn(async () => mocks.context);
+    await manager.createContext('close-error');
+    mocks.context.close.mockRejectedValueOnce(new Error('上下文已关闭'));
+    await expect(manager.closeSession('close-error')).resolves.toBeUndefined();
     expect(manager.getSessionIds()).toEqual([]);
   });
 });

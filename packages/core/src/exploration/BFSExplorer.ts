@@ -25,6 +25,7 @@ export interface ExplorationResult {
 export class BFSExplorer {
   private visitedUrls = new Set<string>();
   private queue: Array<{ url: string; depth: number; trigger: string }> = [];
+  private pendingEdges: Array<{ fromPageId: string; toUrlPattern: string; trigger: string }> = [];
 
   constructor(
     private perceiver: { capture(page: Page): Promise<StructuredObservation> },
@@ -144,7 +145,9 @@ export class BFSExplorer {
 
         const edge = { from: normalizedUrl, to: normalizedTarget, trigger: link.text || 'link' };
         result.navigationGraph.push(edge);
-        this.persistNavigationEdge(pageId, normalizedTarget, edge.trigger);
+        if (!this.persistNavigationEdge(pageId, normalizedTarget, edge.trigger)) {
+          this.pendingEdges.push({ fromPageId: pageId, toUrlPattern: normalizedTarget, trigger: edge.trigger });
+        }
 
         if (!this.visitedUrls.has(normalizedTarget) && depth < this.options.maxDepth) {
           this.queue.push({
@@ -163,6 +166,7 @@ export class BFSExplorer {
     }
 
     result.newPagesDiscovered = result.pagesVisited;
+    this.persistPendingNavigationEdges();
     return result;
   }
 
@@ -230,17 +234,25 @@ export class BFSExplorer {
     return pageId;
   }
 
-  private persistNavigationEdge(fromPageId: string, toUrlPattern: string, trigger: string): void {
+  private persistNavigationEdge(fromPageId: string, toUrlPattern: string, trigger: string): boolean {
     const toPage = this.db.prepare(`
       SELECT id FROM pages WHERE target_id = ? AND url_pattern = ?
     `).get(this.targetId, toUrlPattern) as { id: string } | undefined;
-    if (!toPage) return;
+    if (!toPage) return false;
 
     this.db.prepare(`
       INSERT INTO navigation_edges (id, target_id, from_page_id, to_page_id, trigger_component_id, method)
       VALUES (?, ?, ?, ?, NULL, ?)
       ON CONFLICT(target_id, from_page_id, to_page_id, method) DO NOTHING
     `).run(randomUUID(), this.targetId, fromPageId, toPage.id, trigger);
+    return true;
+  }
+
+  private persistPendingNavigationEdges(): void {
+    for (const edge of this.pendingEdges) {
+      this.persistNavigationEdge(edge.fromPageId, edge.toUrlPattern, edge.trigger);
+    }
+    this.pendingEdges = [];
   }
 
   private resolveUrl(href: string, baseUrl: string): string | null {

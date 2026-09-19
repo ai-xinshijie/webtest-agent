@@ -231,6 +231,24 @@ describe('ScreenshotManager', () => {
     expect(warnSpy.mock.calls.map(call => call.join(' ')).join('\n')).toContain('画布不可用');
     warnSpy.mockRestore();
   });
+
+  it('保存整页截图并保留说明', async () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), 'wta-screenshot-full-'));
+    const manager = new ScreenshotManager(tempDir, 'session-full');
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/full'),
+      screenshot: vi.fn(async (options: { path?: string; fullPage?: boolean; timeout?: number }) => {
+        expect(options.fullPage).toBe(true);
+        expect(options.timeout).toBe(10000);
+        writeFileSync(options.path!, '');
+      }),
+    } as unknown as Page;
+
+    const info = await manager.captureFullPage(page, 'report', '完整证据');
+    expect(info).toMatchObject({ phase: 'report', description: '完整证据', url: 'https://example.com/full' });
+    expect(info?.id).toContain('-full');
+    expect(manager.getByPhase('report')).toEqual([info]);
+  });
 });
 
 describe('createDefaultConfig', () => {

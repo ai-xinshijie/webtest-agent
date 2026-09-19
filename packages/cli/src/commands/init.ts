@@ -18,6 +18,7 @@ export const initCommand = new Command('init')
     mkdirSync(path.join(wtaDir, 'targets'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'plugins'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'sessions'), { recursive: true });
+    mkdirSync(path.join(wtaDir, 'auth'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'reports'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'screenshots'), { recursive: true });
     mkdirSync(path.join(wtaDir, 'videos'), { recursive: true });
@@ -29,6 +30,7 @@ export const initCommand = new Command('init')
     console.log('  .wta/targets/          测试目标');
     console.log('  .wta/plugins/          本地插件');
     console.log('  .wta/sessions/         会话与登录状态');
+    console.log('  .wta/auth/             可复用认证状态');
     console.log('  .wta/reports/          测试报告');
     console.log('  .wta/screenshots/      测试截图');
     console.log('');

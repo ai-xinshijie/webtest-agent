@@ -444,7 +444,7 @@ describe('环境检查分支', () => {
     await runCliCommand(initCommand);
     const browserRoot = path.join(tempDir, 'vendor', 'browsers');
     mkdirSync(browserRoot, { recursive: true });
-    writeFileSync(path.join(browserRoot, 'chrome.exe'), '');
+    writeFileSync(path.join(browserRoot, 'chrome'), '');
 
     Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
     process.env.DISPLAY = ':0';

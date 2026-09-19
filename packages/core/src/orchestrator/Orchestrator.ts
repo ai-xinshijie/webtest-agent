@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import type { Page } from 'playwright';
 import { BrowserManager } from '../browser/BrowserManager.js';
@@ -20,6 +20,7 @@ import type { AgentConfig, TargetConfig } from '../config/types.js';
 import type { StructuredObservation } from '../perception/types.js';
 import { AgentLogger } from '../logger/AgentLogger.js';
 import type { CoverageSnapshot } from '../coverage/CoverageGuarantee.js';
+import { CodeSelfHealer, type HotPatchReport } from '../healing/CodeSelfHealer.js';
 
 export interface Session {
   id: string;
@@ -35,6 +36,7 @@ export interface Session {
   targetConfig?: TargetConfig;
   progress?: TestEngineResult;
   reportPaths?: string[];
+  hotPatchReports?: HotPatchReport[];
 }
 
 export interface RunOptions {
@@ -62,6 +64,7 @@ export class Orchestrator {
   private config: AgentConfig;
   private memory: MemoryManager;
   private router: LLMRouter;
+  private codeHealer: CodeSelfHealer;
 
   constructor(config: AgentConfig) {
     this.config = config;
@@ -69,6 +72,7 @@ export class Orchestrator {
     this.db = new DatabaseManager(config.dbPath);
     this.memory = new MemoryManager(this.db);
     this.router = new LLMRouter(config.models);
+    this.codeHealer = new CodeSelfHealer({ rootDir: process.cwd(), router: this.router });
   }
 
   async run(target: TargetConfig, options: RunOptions = {}): Promise<Session> {
@@ -135,6 +139,29 @@ export class Orchestrator {
     } catch (error) {
       if (session.status === 'stopped') return session;
       const reason = error instanceof Error ? error.message : String(error);
+      const repair = await this.codeHealer.recover(error, {
+        sessionId,
+        strategyName: 'orchestrator-recovery',
+        recentActions: logger.getTimeline(10).map(item => item.trigger.description),
+      });
+      session.hotPatchReports = this.codeHealer.getReports(sessionId);
+      this.db.prepare(`
+        INSERT INTO hot_patch_reports (id, session_id, strategy_name, status, report_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        repair.id,
+        sessionId,
+        repair.strategyName,
+        repair.status,
+        JSON.stringify(repair),
+        repair.createdAt,
+      );
+      logger.logSystem(
+        { description: '代码级自愈诊断完成', module: 'CodeSelfHealer', method: 'recover' },
+        { type: 'code-self-healing', target: repair.strategyName, params: { status: repair.status } },
+        { status: repair.status === 'rejected' || repair.status === 'rolled-back' ? 'warning' : 'success', duration: 0, output: repair, error: repair.error },
+        { phase: session.phase },
+      );
       logger.logSystem(
         { description: '测试会话执行失败', module: 'Orchestrator', method: 'run' },
         { type: 'session-error', target: sessionId },
@@ -147,6 +174,7 @@ export class Orchestrator {
         UPDATE sessions SET status = 'failed', ended_at = ?, phase = ?
         WHERE id = ?
       `).run(session.endedAt, session.phase, sessionId);
+      session.reportPaths = this.saveReports(session, logger);
       throw error;
     }
 
@@ -193,7 +221,15 @@ export class Orchestrator {
     const headless = options.headless ?? this.shouldHeadless();
     const sessionDir = path.join(process.cwd(), '.wta', 'sessions');
     mkdirSync(sessionDir, { recursive: true });
-    const storageStatePath = path.join(sessionDir, `${session.id}.json`);
+   const storageStatePath = path.join(sessionDir, `${session.id}.json`);
+    const authDir = path.join(process.cwd(), '.wta', 'auth');
+    mkdirSync(authDir, { recursive: true });
+    const targetAuthStatePath = path.join(authDir, `${target.name}.json`);
+    const initialStorageStatePath = existsSync(storageStatePath)
+      ? storageStatePath
+      : existsSync(targetAuthStatePath)
+        ? targetAuthStatePath
+        : undefined;
 
     const context = await logger.runScript(
       { description: '创建浏览器上下文', module: 'BrowserManager', method: 'createContext' },
@@ -201,7 +237,7 @@ export class Orchestrator {
       () => this.browserManager.createContext(session.id, {
         headless,
         viewport: this.config.viewport,
-        storageStatePath,
+        storageStatePath: initialStorageStatePath,
       }),
       { phase: 'login' },
     );
@@ -231,10 +267,17 @@ export class Orchestrator {
       { status: loginResult.success ? 'success' : 'failed', duration: 0, output: loginResult },
       { pageUrl: page.url(), phase: 'login' },
     );
+    if (!loginResult.success && loginResult.requiresManual) {
+      throw new Error(loginResult.reason + '。请执行：wta auth capture ' + target.name
+        + '，或 wta auth import ' + target.name + ' <state.json>');
+    }
     if (loginResult.performed && !loginResult.success) {
       throw new Error(`自动登录失败：${loginResult.reason ?? '未知原因'}`);
     }
-    if (loginResult.performed) await auth.saveState(page, storageStatePath, { phase: 'login' });
+    if (loginResult.performed) {
+      await auth.saveState(page, storageStatePath, { phase: 'login' });
+      await auth.saveState(page, targetAuthStatePath, { phase: 'login' });
+    }
 
     const screenshots = new ScreenshotManager(process.cwd(), session.id);
     const initialScreenshot = await screenshots.capture(page, 'initial', '初始页面加载完成');
@@ -336,14 +379,27 @@ export class Orchestrator {
     const afterTestScreenshot = await screenshots.capture(page, 'after-test', '深度测试完成后的页面');
     this.logScreenshot(logger, afterTestScreenshot?.filePath ?? null, 'after-test', page.url(), session.phase);
 
-    const observation = await logger.runScript(
-      { description: '结构化提取测试后的页面状态', module: 'StructuredPerceiver', method: 'capture' },
-      { type: 'perceive', target: page.url(), params: { reason: 'quality-rules' } },
-      () => this.perceiver.capture(page),
-      { pageUrl: page.url(), phase: 'test' },
-    );
-    session.componentModel = this.buildComponentModel(observation);
-    await this.runQualityRules(session, observation);
+    try {
+      const observation = await logger.runScript(
+        { description: '结构化提取测试后的页面状态', module: 'StructuredPerceiver', method: 'capture' },
+        { type: 'perceive', target: page.url(), params: { reason: 'quality-rules' } },
+        () => this.captureWithTimeout(page, this.config.timeout.navigation),
+        { pageUrl: page.url(), phase: 'test' },
+      );
+      session.componentModel = this.buildComponentModel(observation);
+      await this.runQualityRules(session, observation);
+    } catch (error) {
+      logger.logSystem(
+        { description: '测试后页面状态提取受阻，跳过质量规则', module: 'Orchestrator', method: 'agentLoop' },
+        { type: 'quality-rule-skip', target: page.url() },
+        {
+          status: 'warning',
+          duration: 0,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        { pageUrl: page.url(), phase: 'test' },
+      );
+    }
 
 
     await this.finalizeSession(session, page, screenshots);
@@ -374,18 +430,7 @@ export class Orchestrator {
       WHERE id = ?
     `).run(session.endedAt, session.id);
 
-    const reportDir = path.join(process.cwd(), '.wta', 'reports');
-    const reportPaths: string[] = [];
-    for (const format of ['md', 'json'] as const) {
-      const reporter = new ReportGenerator(this.db, { outputDir: reportDir, format });
-      const reportPath = await logger.runScript(
-        { description: `生成${format === 'md' ? '中文 Markdown' : '机器可读 JSON'}测试报告`, module: 'ReportGenerator', method: 'save' },
-        { type: 'generate-report', target: session.id, params: { format } },
-        () => Promise.resolve(reporter.save(session.id)),
-        { phase: 'report' },
-      );
-      reportPaths.push(reportPath);
-    }
+    const reportPaths = this.saveReports(session, logger);
     session.reportPaths = reportPaths;
 
     const summary = await this.memory.compressSession(session.id, { llm: this.router });
@@ -429,7 +474,7 @@ export class Orchestrator {
       + coverage.actions.pending;
     coverage.actions.percentage = actionTotal === 0
       ? 100
-      : (coverage.actions.visited / actionTotal) * 100;
+      : ((coverage.actions.visited + coverage.actions.blocked) / actionTotal) * 100;
     coverage.combinations.percentage = coverage.combinations.total === 0
       ? 100
       : (coverage.combinations.covered / coverage.combinations.total) * 100;
@@ -447,6 +492,37 @@ export class Orchestrator {
       chaosTests: results.reduce((sum, item) => sum + item.chaosTests, 0),
       coverage,
     };
+  }
+
+  private saveReports(session: Session, logger: AgentLogger): string[] {
+    const reportDir = path.join(process.cwd(), '.wta', 'reports');
+    const reportPaths: string[] = [];
+    for (const format of ['md', 'json'] as const) {
+      const reporter = new ReportGenerator(this.db, { outputDir: reportDir, format });
+      const description = `生成${format === 'md' ? '中文 Markdown' : '机器可读 JSON'}测试报告`;
+      try {
+        const reportPath = reporter.save(session.id);
+        reportPaths.push(reportPath);
+        logger.logScript(
+          { description, module: 'ReportGenerator', method: 'save' },
+          { type: 'generate-report', target: session.id, params: { format } },
+          { status: 'success', duration: 0, output: reportPath },
+          { phase: 'report' },
+        );
+      } catch (error) {
+        logger.logSystem(
+          { description: `${description}失败`, module: 'ReportGenerator', method: 'save' },
+          { type: 'generate-report', target: session.id, params: { format } },
+          {
+            status: 'warning',
+            duration: 0,
+            error: String(error).replace(/^Error: /, ''),
+          },
+          { phase: 'report' },
+        );
+      }
+    }
+    return reportPaths;
   }
 
   private persistTarget(target: TargetConfig): void {
@@ -654,6 +730,20 @@ export class Orchestrator {
       return `${parsed.origin}${parsed.pathname}`;
     } catch {
       return url;
+    }
+  }
+
+  private async captureWithTimeout(page: Page, timeout: number): Promise<StructuredObservation> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        this.perceiver.capture(page),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`结构化页面提取超时：${timeout}ms`)), timeout);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

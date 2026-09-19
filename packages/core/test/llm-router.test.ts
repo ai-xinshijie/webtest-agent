@@ -145,4 +145,34 @@ describe('LLMRouter', () => {
     await expect(router.call('ollama', messages)).rejects.toThrow('Ollama API 请求失败：500');
     await expect(router.call('custom', messages)).rejects.toThrow('自定义模型请求失败：500');
   });
+
+  it('模型响应缺失内容时返回空字符串并支持默认地址', async () => {
+    fetchMock.mockResolvedValue(response({}));
+    const router = new LLMRouter({
+      openai: { provider: 'openai', model: 'gpt-test', apiKey: 'key', temperature: 0, maxTokens: 1 },
+      anthropic: { provider: 'anthropic', model: 'claude-test', apiKey: 'key', temperature: 0, maxTokens: 1 },
+      ollama: { provider: 'ollama', model: 'llama-test', temperature: 0, maxTokens: 1 },
+      custom: { provider: 'custom', model: 'custom-test', baseUrl: 'http://custom.test', temperature: 0, maxTokens: 1 },
+    });
+
+    await expect(router.call('openai', messages)).resolves.toBe('');
+    await expect(router.call('anthropic', messages)).resolves.toBe('');
+    await expect(router.call('ollama', messages)).resolves.toBe('');
+    await expect(router.call('custom', messages)).resolves.toBe('');
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual([
+      'https://api.openai.com/v1/chat/completions',
+      'https://api.anthropic.com/v1/messages',
+      'http://localhost:11434/api/chat',
+      'http://custom.test',
+    ]);
+  });
+
+  it('自定义模型不配置密钥时不会传递认证头', async () => {
+    fetchMock.mockResolvedValue(response({ content: [{ text: '备用内容' }] }));
+    const router = new LLMRouter({
+      test: { provider: 'custom', model: 'custom-model', baseUrl: 'http://custom.test', temperature: 0, maxTokens: 1 },
+    });
+    await expect(router.call('test', messages)).resolves.toBe('备用内容');
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).headers).not.toHaveProperty('Authorization');
+  });
 });

@@ -138,13 +138,32 @@ export class TestEngine {
   }
 
   private async testPageActions(page: Page, pageRow: PageRow): Promise<void> {
-    await this.navigate(page, pageRow);
     const components = this.getComponents(pageRow.id);
+    try {
+      await this.navigate(page, pageRow);
+    } catch (error) {
+      this.recordNavigationBlocked(pageRow, components, error);
+      return;
+    }
 
     for (const row of components) {
       const component = this.toExtracted(row);
       for (const action of this.getActions(row.type)) {
         const itemKey = `${this.options.targetId}:${row.id}:${action}`;
+        const unavailableReason = this.getUnavailableReason(component);
+        if (unavailableReason) {
+          this.skippedActions++;
+          this.persistResult({
+            componentId: row.id,
+            testType: action,
+            status: 'skipped',
+            input: { action, selector: row.selector },
+            output: { reason: unavailableReason },
+            startedAt: Date.now(),
+          });
+          this.tracker.markBlocked(row.page_id, row.id, action);
+          continue;
+        }
         if (this.shouldSkip(itemKey)) {
           this.skippedActions++;
           this.persistResult({
@@ -205,20 +224,40 @@ export class TestEngine {
           this.executedActions++;
         }
 
-        await this.navigate(page, pageRow);
+        try {
+          await this.navigate(page, pageRow);
+        } catch (error) {
+          this.logger.logSystem(
+            { description: '动作后页面复位失败，停止当前页面后续动作', module: 'TestEngine', method: 'testPageActions' },
+            { type: 'navigation-blocked', target: pageRow.url_pattern, params: { action } },
+            {
+              status: 'warning', duration: 0,
+              error: String(error).replace(/^Error: /, ''),
+            },
+            { pageUrl: pageRow.url_pattern, phase: 'test' },
+          );
+          this.recordNavigationBlocked(pageRow, components, error);
+          return;
+        }
       }
     }
+
+    this.db.prepare(`
+      UPDATE pages SET test_status = 'tested', last_visited_at = ? WHERE id = ?
+    `).run(Date.now(), pageRow.id);
   }
 
   private async testPageCombinations(page: Page, pageRow: PageRow): Promise<void> {
     const components = this.getComponents(pageRow.id)
+      .filter(row => !this.getUnavailableReason(this.toExtracted(row)))
       .filter(row => this.getActions(row.type).length > 1)
       .slice(0, 10);
 
     if (components.length < 2) return;
 
     const factors = components.map(row => this.getActions(row.type).slice(0, 3));
-    const strength = this.options.depth === 'deep' ? 3 : this.options.depth === 'standard' ? 2 : 1;
+    const strengthByDepth = { deep: 3, standard: 2, quick: 1 } as const;
+    const strength = strengthByDepth[this.options.depth];
     const result = this.covering.generate(factors, strength);
     this.tracker.setExpectedCombinations(result.rows.length);
 
@@ -243,7 +282,12 @@ export class TestEngine {
         this.skippedCombinations++;
         continue;
       }
-      await this.navigate(page, pageRow);
+      try {
+        await this.navigate(page, pageRow);
+      } catch (error) {
+        this.recordCombinationNavigationBlocked(pageRow, components, result.rows.slice(result.rows.indexOf(rowValues)), strength, error);
+        return;
+      }
       const startedAt = Date.now();
       const input: Record<string, unknown> = {};
       let failed = false;
@@ -315,7 +359,7 @@ export class TestEngine {
           const pageRow = this.db.prepare(`
             SELECT id, url_pattern, title FROM pages WHERE id = ?
           `).get(pageId) as PageRow | undefined;
-          if (pageRow) await this.navigate(page, pageRow);
+          await this.navigate(page, pageRow!);
         }
         this.persistResult({
           componentId: null,
@@ -332,7 +376,7 @@ export class TestEngine {
           testType: 'path-coverage',
           status: 'failed',
           input: { path },
-          output: { error: error instanceof Error ? error.message : String(error) },
+          output: { error: String(error).replace(/^Error: /, '') },
           startedAt,
         });
       }
@@ -377,13 +421,32 @@ export class TestEngine {
   }
 
   private async navigate(page: Page, pageRow: PageRow): Promise<void> {
-    await this.logger.runScript(
-      { description: `进入页面执行测试：${pageRow.title ?? pageRow.url_pattern}`, module: 'TestEngine', method: 'navigate' },
-      { type: 'navigate', target: pageRow.url_pattern },
-      () => page.goto(pageRow.url_pattern, { waitUntil: 'domcontentloaded', timeout: 20000 }),
-      { pageUrl: pageRow.url_pattern, phase: 'test' },
-    );
-    await this.revealer.reveal(page, { pageUrl: pageRow.url_pattern, phase: 'test' });
+    const attempts = 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await this.logger.runScript(
+          {
+            description: `进入页面执行测试：${pageRow.title ?? pageRow.url_pattern}（第 ${attempt} 次）`,
+            module: 'TestEngine',
+            method: 'navigate',
+          },
+          { type: 'navigate', target: pageRow.url_pattern, params: { attempt, attempts } },
+          () => page.goto(pageRow.url_pattern, { waitUntil: 'domcontentloaded', timeout: 20000 }),
+          { pageUrl: pageRow.url_pattern, phase: 'test' },
+        );
+        await this.revealer.reveal(page, { pageUrl: pageRow.url_pattern, phase: 'test' });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts) break;
+        await page.waitForTimeout(attempt * 500);
+      }
+    }
+
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`页面导航连续 ${attempts} 次失败：${pageRow.url_pattern}。${reason}`);
   }
 
   private getComponents(pageId: string): ComponentRow[] {
@@ -397,6 +460,66 @@ export class TestEngine {
     return ACTIONS_BY_TYPE[type] ?? ['click'];
   }
 
+  private recordNavigationBlocked(
+    pageRow: PageRow,
+    components: ComponentRow[],
+    error: unknown,
+  ): void {
+    const reason = `页面不可访问，已阻断组件动作：${error instanceof Error ? error.message : String(error)}`;
+    for (const row of components) {
+      for (const action of this.getActions(row.type)) {
+        if (!this.tracker.isPendingAction(row.page_id, row.id, action)) continue;
+        this.tracker.markBlocked(row.page_id, row.id, action);
+        this.persistResult({
+          componentId: row.id,
+          testType: action,
+          status: 'skipped',
+          input: { action, selector: row.selector },
+          output: { reason },
+          startedAt: Date.now(),
+        });
+        this.skippedActions++;
+      }
+    }
+    this.db.prepare(`
+      UPDATE pages SET test_status = 'partial', last_visited_at = ? WHERE id = ?
+    `).run(Date.now(), pageRow.id);
+    this.logger.logSystem(
+      { description: '页面测试已标记为受阻', module: 'TestEngine', method: 'recordNavigationBlocked' },
+      { type: 'navigation-blocked', target: pageRow.url_pattern, params: { scope: 'action', componentCount: components.length } },
+      { status: 'warning', duration: 0, error: reason },
+      { pageUrl: pageRow.url_pattern, phase: 'test' },
+    );
+  }
+
+  private recordCombinationNavigationBlocked(
+    pageRow: PageRow,
+    components: ComponentRow[],
+    rows: string[][],
+    strength: number,
+    error: unknown,
+  ): void {
+    const reason = `页面不可访问，已阻断组合测试：${error instanceof Error ? error.message : String(error)}`;
+    for (const rowValues of rows) {
+      this.tracker.recordCombination(rowValues);
+      this.persistResult({
+        componentId: components[0]!.id,
+        testType: `combination-${strength}way`,
+        status: 'skipped',
+        input: { combination: rowValues },
+        output: { reason },
+        startedAt: Date.now(),
+      });
+      this.skippedCombinations++;
+    }
+    this.logger.logSystem(
+      { description: '组合测试已标记为受阻', module: 'TestEngine', method: 'recordCombinationNavigationBlocked' },
+      { type: 'navigation-blocked', target: pageRow.url_pattern, params: { scope: 'combo', rowCount: rows.length } },
+      { status: 'warning', duration: 0, error: reason },
+      { pageUrl: pageRow.url_pattern, phase: 'combo' },
+    );
+  }
+
   private shouldSkip(itemKey: string): boolean {
     if (this.options.runMode === 'retest' || this.options.runMode === 'fresh') return false;
 
@@ -404,6 +527,12 @@ export class TestEngine {
     if (this.options.runMode === 'regression') return status !== null && status !== 'failed';
     if (this.options.runMode === 'continue') return status !== null;
     return status === 'passed' || status === 'skipped';
+  }
+
+  private getUnavailableReason(component: ExtractedComponent): string | null {
+    if (!component.state.visible) return '组件当前不可见，已阻断动作执行';
+    if (!component.state.enabled) return '组件当前已禁用，已阻断动作执行';
+    return null;
   }
 
   private toExtracted(row: ComponentRow): ExtractedComponent {

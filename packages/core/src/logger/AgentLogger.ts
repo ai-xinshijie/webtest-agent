@@ -275,10 +275,37 @@ export class AgentLogger {
   private safeClone(value: unknown): unknown {
     if (value === undefined) return undefined;
     try {
-      return JSON.parse(JSON.stringify(value));
+      const seen = new WeakSet<object>();
+      return JSON.parse(JSON.stringify(value, (_key, nested: unknown) => {
+        if (typeof nested === 'bigint') return nested.toString();
+        if (typeof nested === 'symbol') return nested.toString();
+        if (typeof nested !== 'object' || nested === null) return nested;
+        if (seen.has(nested)) return '[循环引用]';
+        seen.add(nested);
+        return nested;
+      }));
     } catch {
-      return String(value);
+      return this.cloneFallback(value);
     }
+  }
+
+  /** 在对象自定义 toJSON 抛错时，按字段保留可审计结构。 */
+  private cloneFallback(value: unknown, seen = new WeakSet<object>()): unknown {
+    if (typeof value === 'bigint' || typeof value === 'symbol') return value.toString();
+    if (value === null || typeof value !== 'object') return value;
+    if (seen.has(value)) return '[循环引用]';
+    seen.add(value);
+    if (typeof (value as { toJSON?: unknown }).toJSON === 'function') return String(value);
+    if (Array.isArray(value)) return value.map(item => this.cloneFallback(item, seen));
+    const copy: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      try {
+        copy[key] = this.cloneFallback((value as Record<string, unknown>)[key], seen);
+      } catch {
+        copy[key] = '[无法读取]';
+      }
+    }
+    return copy;
   }
 
   private errorMessage(error: unknown): string {

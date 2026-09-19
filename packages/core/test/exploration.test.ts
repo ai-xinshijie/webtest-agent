@@ -7,6 +7,7 @@ import { DatabaseManager } from '../src/db/Database.js';
 import { BFSExplorer } from '../src/exploration/BFSExplorer.js';
 import { StructuredPerceiver } from '../src/perception/StructuredPerceiver.js';
 import type { StructuredObservation } from '../src/perception/types.js';
+import { AgentLogger } from '../src/logger/AgentLogger.js';
 
 let db: DatabaseManager | null;
 let tempDir: string;
@@ -132,6 +133,108 @@ describe('BFSExplorer', () => {
     expect(result.pagesVisited).toBe(0);
     expect(perceiver.capture).not.toHaveBeenCalled();
     expect(database.prepare('SELECT COUNT(*) AS count FROM pages').get()).toEqual({ count: 0 });
+  });
+
+  it('URL 标准化与排除规则在重复和非法地址下保持稳定', async () => {
+    const database = createDatabase();
+    const explorer = new BFSExplorer({ capture: vi.fn() }, database, 'target-1', {
+      maxPages: 1, maxDepth: 1, excludePaths: ['/skip'],
+    }) as any;
+    expect(explorer.normalizeUrl('https://example.com/path/')).toBe('https://example.com/path');
+    expect(explorer.normalizeUrl('非法地址')).toBe('非法地址');
+    expect(explorer.resolveUrl('mailto:test@example.com', 'https://example.com')).toBeNull();
+    expect(explorer.resolveUrl('bad:url', 'https://example.com')).toBe('bad:url');
+  });
+
+  it('跳过已访问和排除页面，并以可读文本记录非 Error 导航失败', async () => {
+    const database = createDatabase();
+    const page = {
+      goto: vi.fn().mockRejectedValue('网关不可用'),
+      waitForTimeout: vi.fn(),
+      url: vi.fn(),
+      evaluate: vi.fn(),
+    } as unknown as Page;
+    const logger = new AgentLogger(database, 'session-1', { consoleOutput: false });
+
+    const excluded = new BFSExplorer({ capture: vi.fn() }, database, 'target-1', {
+      maxPages: 2, maxDepth: 1, excludePaths: ['/skip'],
+    }, logger) as any;
+    await excluded.explore(page, 'https://example.com/skip');
+    expect((page.goto as any)).not.toHaveBeenCalled();
+
+    const duplicate = new BFSExplorer({ capture: vi.fn() }, database, 'target-1', {
+      maxPages: 2, maxDepth: 1, excludePaths: [],
+    }, logger) as any;
+    duplicate.visitedUrls.add('https://example.com/seen');
+    await duplicate.explore(page, 'https://example.com/seen');
+    expect((page.goto as any)).not.toHaveBeenCalled();
+
+    const failing = new BFSExplorer({ capture: vi.fn() }, database, 'target-1', {
+      maxPages: 2, maxDepth: 1, excludePaths: [],
+    }, logger);
+    await failing.explore(page, 'https://example.com/fail');
+    expect(logger.getTimeline().some(log => log.result.error === '网关不可用')).toBe(true);
+  });
+
+  it('使用组件标签和 unknown 标签回退持久化缺省字段', async () => {
+    const database = createDatabase();
+    const observation = {
+      ...createObservation(),
+      components: [{ ...createObservation().components[0]!, selector: null, text: null, ariaLabel: null }],
+    };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      waitForTimeout: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn().mockResolvedValue([]),
+    } as unknown as Page;
+    const result = await new BFSExplorer({ capture: vi.fn().mockResolvedValue(observation) }, database, 'target-1', {
+      maxPages: 1, maxDepth: 0, excludePaths: [],
+    }).explore(page, 'https://example.com/page');
+    expect(result.totalComponents).toBe(1);
+    expect(database.prepare('SELECT selector, label FROM components').get()).toMatchObject({ selector: 'button', label: 'unknown' });
+  });
+
+  it('记录揭示、日志、待补导航边并更新已存在页面', async () => {
+    const database = createDatabase();
+    const first = createObservation();
+    const second = { ...createObservation(), url: 'https://example.com/other', title: '其他页面' };
+    const perceiver = { capture: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second) };
+    const revealer = { reveal: vi.fn().mockResolvedValue({ interactions: 1, revealedComponents: 1, revealedSelectors: ['#revealed'] }) };
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      waitForTimeout: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn()
+        .mockResolvedValueOnce([
+          { href: '/other', text: '' }, { href: 'mailto:test@example.com', text: '邮件' },
+          { href: 'tel:10086', text: '电话' }, { href: 'http://[bad', text: '错误链接' },
+        ])
+        .mockResolvedValueOnce([{ href: '/page/', text: '返回' }, { href: '/skip', text: '跳过' }]),
+    } as unknown as Page;
+    const logger = new AgentLogger(database, 'session-1', { consoleOutput: false });
+    const explorer = new BFSExplorer(perceiver, database, 'target-1', {
+      maxPages: 5, maxDepth: 2, excludePaths: ['/skip'],
+    }, logger, revealer as any);
+
+    const result = await explorer.explore(page, 'https://example.com/page/');
+
+    expect(result).toMatchObject({ pagesVisited: 2, newPagesDiscovered: 2, totalComponents: 2 });
+    expect(result.navigationGraph).toContainEqual({
+      from: 'https://example.com/page', to: 'https://example.com/other', trigger: 'link',
+    });
+    expect(revealer.reveal).toHaveBeenCalledTimes(2);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM navigation_edges').get()).toEqual({ count: 2 });
+    expect(logger.getTimeline().some(log => log.action.type === 'reveal')).toBe(true);
+
+    const update = new BFSExplorer({ capture: vi.fn().mockResolvedValue(first) }, database, 'target-1', {
+      maxPages: 1, maxDepth: 0, excludePaths: [],
+    });
+    await update.explore({
+      goto: vi.fn().mockResolvedValue(undefined), waitForTimeout: vi.fn().mockResolvedValue(undefined),
+      evaluate: vi.fn().mockResolvedValue([]),
+    } as unknown as Page, 'https://example.com/page');
+    expect(database.prepare("SELECT visit_count FROM pages WHERE url_pattern = 'https://example.com/page'").get()).toEqual({ visit_count: 2 });
   });
 });
 

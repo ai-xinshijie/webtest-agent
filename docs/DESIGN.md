@@ -215,7 +215,7 @@ GUI 技术形态：本地 Web 服务（`wta gui` 启动），浏览器打开 `ht
 | GUI 后端 | Fastify + WebSocket | 轻量、WS 推送实时状态 |
 | GUI 前端 | React 18 + Vite | 组件化、实时更新 |
 | 浏览器控制 | Playwright | DOM/A11y/截图/网络拦截/多浏览器 |
-| 持久化 | better-sqlite3 | 零配置、单文件、事务安全 |
+| 持久化 | Node 内置 `node:sqlite` | 零外部原生依赖、单文件数据库、事务安全 |
 | Schema 验证 | Zod | LLM 输出结构化验证 |
 | 日志 | pino | JSON 日志、高性能 |
 | 进程管理 | 自研 daemon + IPC | Agent 后台运行、CLI attach |
@@ -4156,141 +4156,30 @@ webtest-agent/
 
 ---
 
-## 12. 实施计划
+## 12. 实施状态与验收
 
-### Phase 1: 基础框架（v0.1）
+本仓库已实现 CLI、常驻 Agent、GUI、结构化感知、BFS 探索、组件动作测试、组合与路径覆盖、深度网络故障注入、会话记忆、模型路由、插件/MCP、认证状态管理、受控代码级自愈和中文报告与中文时间线。实现对应关系见 [IMPLEMENTATION.md](IMPLEMENTATION.md)。
 
-**目标**: CLI 骨架 + 基础 Agent 循环跑通
+### 已交付能力
 
-- [ ] pnpm monorepo 初始化
-- [ ] `packages/core` 基础结构
-- [ ] `packages/cli` commander 骨架
-- [ ] `wta init / install browsers / doctor` 可执行
-- [ ] `wta target add / run --phase explore` 可执行
-- [ ] Playwright 浏览器自动下载和启动（.wta/browsers）
-- [ ] 登录流程
-- [ ] headless / headed 模式切换
-- [ ] ErrorBoundary + 循环检测基础框架
-- [ ] DOM 感知器（A11y Tree 获取）
-- [ ] LLM Router（OpenAI + Anthropic 双 Provider）
-- [ ] 组件识别（Layer 1 规则匹配，不含 LLM）
-- [ ] SQLite 数据库初始化和基础表
-- [ ] 日志系统
+- CLI 与 GUI 共用 `Orchestrator`，GUI 只负责可视化管理和实时状态展示。
+- 浏览器由 `BrowserManager` 使用仓库 `vendor/browsers` 的 Playwright Chromium 启动；Linux 选择 Linux 二进制并支持无头运行。
+- 感知采用浏览器内的结构化 DOM/CSS 提取，包含可见性、启用状态、ARIA、可点击性、表单约束和稳定选择器；无障碍信息和截图用于补充。
+- 探索以同源 BFS、导航图和组件持久化为主；手风琴、Tab、下拉菜单与悬停入口在扫描前受控揭示。
+- 动作覆盖对每个可识别组件生成类型化动作；不可见或禁用项记录为受阻覆盖，避免无意义的 Playwright 超时。
+- 小组合空间执行完整笛卡尔组合；大空间执行有限强度的 t-way 覆盖数组。路径覆盖采用无循环、最大深度和最大路径数的明确预算。
+- `continue`、`fresh`、`retest`、`expand`、`regression` 通过记忆库确定跳过、重测或扩展范围，完成后压缩为可继承摘要。
+- 普通登录可自动填写；验证码或二次验证不会绕过，使用 `wta auth capture/import/export` 保存合法 `storageState`。
+- 脚本、模型、系统和用户触发均落库为时间线；模型日志保存请求、响应与执行结果，GUI 默认摘要并可展开详情。
+- 浏览器崩溃可自动重启；页面导航有三次短退避重试。代码级自愈默认仅生成诊断和补丁建议，自动模式必须通过路径、高风险 API、构建和测试审查，失败即回滚。
 
-### Phase 2: 探索与组件建模（v0.2）
+### 覆盖边界
 
-**目标**: 完整 组件模型构建
+Web 界面的状态与组合空间通常是无界的，不能诚实地宣称对任意系统“绝对穷尽”。本实现对可发现的同源页面、已识别组件与设定预算内路径给出可审计的覆盖快照；动作覆盖单独列出已执行、受阻和待覆盖，组合与路径分别列出覆盖数、总数与强度/深度边界。需要扩大探索时使用 `--mode expand` 或提高目标策略预算。
 
-- [ ] BFS 页面探索策略
-- [ ] LLM 组件识别（不确定节点走 LLM）
-- [ ] UI Model 完整构建和持久化
-- [ ] 导航图生成
-- [ ] `wta attach` 实时终端界面
-- [ ] `wta status / stop`
-- [ ] 断点保存和恢复
+### 质量门禁
 
-### Phase 3: 测试引擎与覆盖保证（v0.3）
-
-**目标**: 能跑真实的组件测试 + 可证明的覆盖率
-
-- [ ] 结构化感知器（自定义提取脚本 + a11y 树合并）
-- [ ] 组件模型两层分类（内置规则 + 签名库匹配）
-- [ ] 质量规则引擎（三层：内置规则 / 学习规则 / LLM 即时判断）
-- [ ] 6 条内置质量规则实现
-- [ ] Frontier Queue（探索穷尽的形式化判定）
-- [ ] ComponentRevealer（手风琴/Tab/弹框/悬停/滚动/下拉揭示）
-- [ ] StateCoverageManager（数据状态管理：空/单条/多条/分页/筛选）
-- [ ] TestDataLifecycle（测试数据创建追踪与清理）
-- [ ] 组件测试用例生成（含表单约束提取）
-- [ ] 测试执行器
-- [ ] Bug 检测器（规则违反 + 网络错误 + Console 错误）
-- [ ] 截图采集
-- [ ] Bug 报告数据结构
-- [ ] 导航宏缓存（NavigationMacro）
-- [ ] 编译用例生成（测试通过后自动编译）
-- [ ] 编译用例直接执行（不调 LLM）
-- [ ] 编译用例失败时的重分析逻辑
-- [ ] PageLoadDetector（SPA 加载完成判断：网络空闲 + DOM 稳定 + 无 loading）
-- [ ] AuthSessionManager（认证过期检测与自动重连）
-- [ ] AgentSelfHealer 完整实现（错误分级、浏览器重启恢复、健康监控降级）
-- [ ] HotPatchReport（会话结束输出热修复报告，v2 代码级自愈预留接口）
-
-### Phase 4: 记忆与自进化（v0.4）
-
-**目标**: 跨会话记忆 + 组件模型/质量规则自进化
-
-- [ ] AppMemory 完整实现
-- [ ] TestedItems 追踪
-- [ ] 记忆继承（跳过已测、优先历史 Bug）
-- [ ] 会话压缩（LLM）
-- [ ] `wta memory` CLI 命令
-- [ ] 质量规则学习（从观察归纳，置信度加权）
-- [ ] 组件签名库（跨应用组件识别迁移）
-- [ ] 质量规则进化：置信度调整 + 晋升 + 自动退休
-- [ ] 跨应用记忆（UI Patterns、Strategy Stats）
-
-### Phase 5: 报告系统（v0.5）
-
-**目标**: 专业级报告输出
-
-- [ ] Markdown 报告生成器
-- [ ] JSON 机器可读报告
-- [ ] CoverageReport（7 个维度的覆盖矩阵 + limitations 说明）
-- [ ] Bug 去重
-- [ ] `wta report` CLI 完整实现
-- [ ] 退出码（CI/CD 集成）
-
-### Phase 6: GUI（v0.6）
-
-**目标**: Web 管理界面
-
-- [ ] CLI 内嵌 API Server（同 CLI 命令调用同一 Core API）
-- [ ] WebSocket 实时事件推送
-- [ ] React 前端（Vite + TS）
-- [ ] Dashboard 页面
-- [ ] Monitor 实时监控页面（截图流 + 日志流 + Bug 列表）
-- [ ] Targets 管理页面
-- [ ] Reports 浏览页面
-- [ ] Memory 浏览页面
-- [ ] Settings 页面
-
-### Phase 7: 插件系统（v0.7）
-
-**目标**: 最小可用的工具扩展
-
-- [ ] Tool 插件协议定义
-- [ ] 本地 plugins/ 目录自动加载
-- [ ] `wta plugin list/enable/disable` CLI 命令
-- [ ] 内置示例插件（api-tester）
-
-### Phase 8: 深度测试与并行（v0.8）
-
-**目标**: 组合覆盖、发散测试、并行浏览器
-
-- [ ] 关联组件发现（同 Form / 同 Modal / 联动字段 / 历史关联）
-- [ ] IPOG Covering Array 算法（pairwise / n-wise 组合生成）
-- [ ] CombinationCoverageTracker（覆盖验证与报告）
-- [ ] PathCoverageTracker（K 步序列覆盖追踪）
-- [ ] NetworkFaultInjector（网络拦截：500 / 断网 / 慢响应 / 超时）
-- [ ] expand 模式（发散测试：组合加深、序列探索、状态扩散、边界推进）
-- [ ] parallel 并行浏览器（按一级路由分区，多 Worker 同时测试）
-- [ ] Linux headless 支持（无 Docker，直接 `wta install deps` + `wta run --headless`）
-
-### Phase 9: MCP Client（v0.9）
-
-**目标**: 外部工具生态接入
-
-- [ ] MCP Client 实现（连接外部 MCP Server，工具注册）
-
-### Phase 10: 打磨与发布（v1.0）
-
-**目标**: 生产可用
-
-- [ ] 24h 稳定性测试
-- [ ] 完整文档和使用指南
-- [ ] 错误恢复和边界处理
-- [ ] 性能优化（并行 Worker 内存控制、截图文件清理）
-- [ ] npm 发布准备
+所有已实现模块均有单元或集成测试；CI 运行 `pnpm build` 和 `pnpm test`，并对语句、分支、函数、行设置 100% 覆盖率门禁。真实 DemoQA 验收使用 `https://demoqa.com/text-box`，其报告落在 `.wta/reports/`，用于验证浏览器、结构化感知、受阻动作、组合与时间线的端到端链路。24 小时持续稳定性属于环境时长验证，不能由一次本地单元测试替代，部署前应在目标系统上执行对应的长期运行验收。
 
 ---
 ## 13. 风险与缓解

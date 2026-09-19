@@ -279,7 +279,7 @@ export class MemoryManager {
       } catch (error) {
         summary = {
           ...summary,
-          模型压缩失败原因: error instanceof Error ? error.message : String(error),
+          模型压缩失败原因: String(error).replace(/^Error: /, ''),
         };
       }
     }

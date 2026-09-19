@@ -7,6 +7,7 @@ export interface LoginResult {
   performed: boolean;
   success: boolean;
   reason?: string;
+  requiresManual?: boolean;
 }
 
 /**
@@ -26,6 +27,16 @@ export class AuthSessionManager {
   ): Promise<LoginResult> {
     if (!target.credentials.username && !target.credentials.password) {
       return { performed: false, success: true, reason: '目标未配置凭证，跳过登录' };
+    }
+
+    const challenge = await this.detectChallenge(page);
+    if (challenge) {
+      return {
+        performed: false,
+        success: false,
+        requiresManual: true,
+        reason: '检测到' + challenge + '，需要人工认证后导入登录状态',
+      };
     }
 
     const password = page.locator('input[type="password"]').first();
@@ -156,5 +167,28 @@ export class AuthSessionManager {
       .first()
       .isVisible({ timeout: 2000 })
       .catch(() => false);
+  }
+
+  private async detectChallenge(page: Page): Promise<'验证码' | '二次验证' | null> {
+    const captchaSelectors = [
+      'iframe[src*="recaptcha"]',
+      'iframe[src*="hcaptcha"]',
+      '[class*="captcha" i]',
+      '[data-sitekey]',
+    ];
+    for (const selector of captchaSelectors) {
+      if (await page.locator(selector).count().catch(() => 0)) return '验证码';
+    }
+
+    const twoFactorSelectors = [
+      'input[autocomplete="one-time-code"]',
+      'input[name*="otp" i]',
+      'input[name*="2fa" i]',
+      'input[name*="verification" i]',
+    ];
+    for (const selector of twoFactorSelectors) {
+      if (await page.locator(selector).count().catch(() => 0)) return '二次验证';
+    }
+    return null;
   }
 }

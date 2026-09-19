@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseManager } from '../src/db/Database.js';
 import { AgentLogger, estimateTokens } from '../src/logger/AgentLogger.js';
 import { LLMRouter } from '../src/llm/LLMRouter.js';
@@ -127,6 +127,120 @@ describe('AgentLogger', () => {
     expect(logger.getTimeline().every(log => log.result.status === 'failed')).toBe(true);
     expect(logger.getModelCalls()[0].result.error).toBe('模型失败');
     expect(estimateTokens('abcabcabc')).toBe(3);
+  });
+
+  it('输出控制台日志、复用序号并将不可序列化内容降级为字符串', () => {
+    const database = createDatabase('session-console');
+    const silent = new AgentLogger(database, 'session-console', { consoleOutput: false });
+    silent.logUser(
+      { description: '已有事件', module: '测试', method: 'user' }, { type: 'user' }, { status: 'warning' }, { phase: 'test' },
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const logger = new AgentLogger(database, 'session-console', { consoleOutput: true });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const entry = logger.logSystem(
+      { description: '控制台事件', module: '测试', method: 'console' },
+      { type: 'cycle', params: cyclic },
+      { status: 'failed', error: '详情错误', output: cyclic },
+      { phase: 'test' },
+    );
+    expect(entry.sequence).toBe(2);
+    expect((entry.action.params as Record<string, unknown>).self).toBe('[循环引用]');
+    expect((entry.result.output as Record<string, unknown>).self).toBe('[循环引用]');
+    expect(logger.getTimeline(0)).toHaveLength(2);
+    expect(logger.getTimeline(1)).toHaveLength(1);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[0002] system failed 控制台事件'));
+    expect(warnSpy).toHaveBeenCalledWith('    详情错误');
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it('不可 JSON 序列化值和非 Error 异常保留可读文本', async () => {
+    const database = createDatabase('session-non-json');
+    const logger = new AgentLogger(database, 'session-non-json', { consoleOutput: false });
+    await expect(logger.runScript(
+      { description: '抛出文本', module: '测试', method: 'throw-text' },
+      { type: 'throw-text' },
+      async () => { throw '文本异常'; },
+      { phase: 'test' },
+    )).rejects.toBe('文本异常');
+    logger.logSystem(
+      { description: '大整数', module: '测试', method: 'bigint' },
+      { type: 'bigint', params: { value: BigInt(1) } },
+      { status: 'success', output: BigInt(2) },
+      { phase: 'test' },
+    );
+    const timeline = logger.getTimeline();
+    expect(timeline[0]?.result.error).toBe('文本异常');
+    expect((timeline[1]?.action.params as Record<string, unknown>).value).toBe('1');
+    expect(timeline[1]?.result.output).toBe('2');
+  });
+
+  it('无法 JSON 编码的 Symbol 会降级为可读审计文本', () => {
+    const database = createDatabase('session-symbol');
+    const logger = new AgentLogger(database, 'session-symbol', { consoleOutput: false });
+    const value = Symbol('审计值');
+    const entry = logger.logSystem(
+      { description: '符号值', module: '测试', method: 'symbol' },
+      { type: 'symbol', params: value as never },
+      { status: 'success', output: value },
+      { phase: 'test' },
+    );
+    expect(entry.action.params).toBe('Symbol(审计值)');
+    expect(entry.result.output).toBe('Symbol(审计值)');
+  });
+
+  it('审计文本覆盖空 token、模型前缀和 toJSON 异常降级', () => {
+    const database = createDatabase('session-format');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logger = new AgentLogger(database, 'session-format', { consoleOutput: true });
+    const problematic = { toJSON: () => { throw new Error('无法编码'); } };
+    const entry = logger.logSystem(
+      { description: '降级对象', module: '测试', method: 'format' },
+      { type: 'format', params: problematic as never },
+      { status: 'success', output: problematic },
+      { phase: 'test' },
+    );
+    expect(entry.action.params).toBe('[object Object]');
+    expect(entry.result.output).toBe('[object Object]');
+    expect(estimateTokens('')).toBe(0);
+    (logger as any).print({ ...entry, model: { provider: 'openai', model: 'test', taskType: 'x' }, result: { status: 'success', duration: 1 } });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[openai/test]'));
+    logSpy.mockRestore();
+  });
+
+  it('结构化降级保留数组、循环引用、特殊值和不可读字段', () => {
+    const database = createDatabase('session-fallback');
+    const logger = new AgentLogger(database, 'session-fallback', { consoleOutput: false }) as any;
+    const cyclic: Record<string, unknown> = { value: BigInt(2), symbol: Symbol('x') };
+    cyclic.self = cyclic;
+    const unreadable: Record<string, unknown> = {};
+    Object.defineProperty(unreadable, 'broken', { enumerable: true, get: () => { throw new Error('不可读'); } });
+    expect(logger.cloneFallback([cyclic])).toEqual([{ value: '2', symbol: 'Symbol(x)', self: '[循环引用]' }]);
+    expect(logger.cloneFallback(unreadable)).toEqual({ broken: '[无法读取]' });
+    expect(logger.cloneFallback(null)).toBeNull();
+    expect(logger.cloneFallback('文本')).toBe('文本');
+  });
+
+  it('没有历史序号时从零开始，并允许模型响应缺少文本', async () => {
+    const inserts: unknown[][] = [];
+    const fakeDb = {
+      prepare: vi.fn((sql: string) => ({
+        get: () => sql.includes('MAX(sequence)') ? undefined : undefined,
+        all: () => [],
+        run: (...args: unknown[]) => inserts.push(args),
+      })),
+    };
+    const logger = new AgentLogger(fakeDb as never, 'empty', { consoleOutput: false });
+    await logger.runModel(
+      { description: '空模型文本', module: '测试', method: 'model' }, { type: 'model' },
+      { provider: 'custom', model: 'empty', taskType: 'x', request: { messages: [] } },
+      async () => ({ content: undefined as never }), { phase: 'test' },
+    );
+    expect(logger.getTimeline()[0]).toMatchObject({ sequence: 1, result: { output: '' } });
+    expect(inserts).toHaveLength(1);
   });
 });
 

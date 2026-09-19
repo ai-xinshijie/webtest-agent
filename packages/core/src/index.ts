@@ -4,6 +4,7 @@ export { StructuredPerceiver } from './perception/StructuredPerceiver.js';
 export { DatabaseManager } from './db/Database.js';
 export { LLMRouter } from './llm/LLMRouter.js';
 export { AgentSelfHealer } from './healing/AgentSelfHealer.js';
+export { CodeSelfHealer, StrategyRegistry } from './healing/CodeSelfHealer.js';
 export { ExplorationFrontier } from './exploration/ExplorationFrontier.js';
 export { InteractionExecutor } from './tester/InteractionExecutor.js';
 export { BFSExplorer } from './exploration/BFSExplorer.js';
@@ -34,6 +35,9 @@ export type { RevealResult } from './exploration/ComponentRevealer.js';
 export type { LoginResult } from './auth/AuthSessionManager.js';
 export type { NetworkFault, NetworkFaultType } from './testing/NetworkFaultInjector.js';
 export type { MCPTool } from './plugin/MCPClient.js';
+export type {
+  CodeRepairContext, CodeSelfHealerOptions, CommandResult, HotPatchReport, HotPatchStatus, RepairProposal, SourcePatch,
+} from './healing/CodeSelfHealer.js';
 export type { PluginTool, WtaPlugin, WtaPluginContext } from './plugin/PluginManager.js';
 export type {
   ComponentType, PageRole, PageNode, Component,

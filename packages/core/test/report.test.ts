@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DatabaseManager } from '../src/db/Database.js';
 import { AgentLogger } from '../src/logger/AgentLogger.js';
 import { ReportGenerator } from '../src/reporter/ReportGenerator.js';
@@ -52,6 +52,22 @@ function setup(): { database: DatabaseManager; sessionId: string } {
     { status: 'success', duration: 2000 },
     { phase: 'report' },
   );
+  db.prepare(`UPDATE sessions SET progress_json = ? WHERE id = 'session-1'`).run(JSON.stringify({
+    coverage: {
+      actions: { visited: 3, blocked: 1, pending: 0, percentage: 75 },
+      combinations: { covered: 4, total: 5, percentage: 80 },
+      paths: { covered: 2, total: 2, percentage: 100 },
+    },
+  }));
+  db.prepare(`
+    INSERT INTO hot_patch_reports (id, session_id, strategy_name, status, report_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('patch-1', 'session-1', 'orchestrator-recovery', 'proposed', JSON.stringify({
+    strategyName: 'orchestrator-recovery',
+    status: 'proposed',
+    rootCause: '登录异常',
+    explanation: '等待人工审核补丁',
+  }), 2600);
 
   return { database: db, sessionId: 'session-1' };
 }
@@ -75,6 +91,11 @@ describe('ReportGenerator', () => {
     expect(report).toContain('脚本');
     expect(report).toContain('执行表单测试');
     expect(report).toContain('按钮：1 个');
+    expect(report).toContain('### 深度覆盖');
+    expect(report).toContain('| 动作 | 3 | 1 | 0 | 4 | 75.00% |');
+    expect(report).toContain('已确认受阻的动作计入已解析覆盖');
+    expect(report).toContain('## 代码自愈');
+    expect(report).toContain('登录异常');
   });
 
   it('生成机器可读 JSON 报告并保留完整日志详情', () => {
@@ -88,6 +109,31 @@ describe('ReportGenerator', () => {
     expect(parsed.执行时间线).toHaveLength(2);
     expect(parsed.执行时间线[0].操作.type).toBe('form-test');
     expect(parsed.执行时间线[1].结果.duration).toBe(2000);
+    expect(parsed.深度覆盖.actions.blocked).toBe(1);
+    expect(parsed.代码自愈[0].rootCause).toBe('登录异常');
+    expect(parsed.执行异常).toEqual([]);
+    expect(parsed.测试结果[0].输出).toEqual({});
+  });
+
+  it('将失败测试作为执行异常呈现，而不混入产品问题列表', () => {
+    const { database, sessionId } = setup();
+    database.prepare(
+      "UPDATE test_results SET status = 'failed', input_json = ?, output_json = ?, duration_ms = ? WHERE id = ?",
+    ).run(JSON.stringify({ selector: '#submit' }), JSON.stringify({ error: '点击超时' }), 5000, 'result-1');
+
+    const markdown = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).generate(sessionId);
+    expect(markdown).toContain('## 执行异常（1 条）');
+    expect(markdown).toContain('执行异常 1：form-submit');
+    expect(markdown).toContain('点击超时');
+
+    const json = JSON.parse(new ReportGenerator(database, { outputDir: tempDir, format: 'json' }).generate(sessionId));
+    expect(json.问题列表).toHaveLength(1);
+    expect(json.执行异常).toEqual([{
+      测试类型: 'form-submit',
+      耗时毫秒: 5000,
+      输入: { selector: '#submit' },
+      错误证据: { error: '点击超时' },
+    }]);
   });
 
   it('保存报告到指定目录', () => {
@@ -104,5 +150,111 @@ describe('ReportGenerator', () => {
     const { database } = setup();
     expect(() => new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).generate('missing'))
       .toThrow('未找到测试会话：missing');
+  });
+
+  it('翻译状态、组件、严重级别与自愈状态的全部受支持值', () => {
+    const { database } = setup();
+    const report = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;
+
+    expect(['running', 'completed', 'failed', 'paused', 'passed', 'failed_test', 'skipped', 'warning']
+      .map(value => report.translateStatus(value))).toEqual(['运行中', '已完成', '失败', '已暂停', '通过', '未通过', '已跳过', '警告']);
+    expect(report.translateStatus('custom')).toBe('custom');
+    expect(['untested', 'partial', 'tested', 'other'].map(value => report.translateTestStatus(value)))
+      .toEqual(['未测试', '部分测试', '已测试', 'other']);
+    expect(['critical', 'major', 'minor', 'info', 'other'].map(value => report.translateSeverity(value)))
+      .toEqual(['严重', '重要', '一般', '提示', 'other']);
+    expect(['script', 'model', 'system', 'user', 'other'].map(value => report.translateSource(value)))
+      .toEqual(['脚本', '模型', '系统', '用户', 'other']);
+    expect([
+      'button', 'input', 'textarea', 'select', 'form', 'table', 'modal', 'accordion', 'tab', 'toast',
+      'checkbox', 'radio', 'navigation', 'breadcrumb', 'pagination', 'link', 'dropdown', 'datepicker',
+      'fileupload', 'unknown', 'other',
+    ].map(value => report.translateComponentType(value))).toEqual([
+      '按钮', '输入框', '文本域', '下拉选择', '表单', '表格', '弹框', '手风琴', '标签页', '通知',
+      '复选框', '单选框', '导航', '面包屑', '分页', '链接', '下拉菜单', '日期选择', '文件上传', '未知组件', 'other',
+    ]);
+    expect(['fallback-applied', 'proposed', 'applied', 'rejected', 'rolled-back', 'other']
+      .map(value => report.translateHotPatchStatus(value)))
+      .toEqual(['已切换降级策略', '待人工审核', '已应用', '已拒绝', '已回滚', 'other']);
+  });
+
+  it('空数据、未知值与覆盖快照边界仍可生成报告', () => {
+    const { database, sessionId } = setup();
+    database.prepare('DELETE FROM components').run();
+    database.prepare('DELETE FROM pages').run();
+    database.prepare('DELETE FROM bugs').run();
+    database.prepare('DELETE FROM test_results').run();
+    database.prepare('DELETE FROM agent_logs').run();
+    database.prepare('DELETE FROM hot_patch_reports').run();
+    database.prepare('UPDATE sessions SET ended_at = NULL, progress_json = NULL, status = ? WHERE id = ?').run('custom', sessionId);
+    const markdown = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).generate(sessionId);
+    expect(markdown).toContain('N/A 秒');
+    expect(markdown).toContain('本次会话尚未生成深度覆盖快照。');
+    expect(markdown).toContain('本次测试未发现问题。');
+    expect(markdown).toContain('本次会话未触发代码级自愈。');
+    expect(markdown).toContain('暂无审计日志');
+
+    const generator = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;
+    expect(generator.coverageMarkdown({ coverage: {
+      actions: { visited: 0, blocked: 0, pending: 1, percentage: 0 },
+      combinations: { covered: 3, total: 1, percentage: 300 },
+      paths: { covered: 0, total: 0, percentage: 0 },
+    } })).toContain('| 组合 | 3 | 0 | 0 | 1 | 300.00% |');
+  });
+
+  it('保存报告支持指定文件名', () => {
+    const { database, sessionId } = setup();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const filename = path.join(tempDir, 'custom', 'result.md');
+    expect(new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).save(sessionId, filename)).toBe(filename);
+    expect(existsSync(filename)).toBe(true);
+    logSpy.mockRestore();
+  });
+
+  it('不完整证据字段在 Markdown 和 JSON 中有稳定回退值', () => {
+    const { database, sessionId } = setup();
+    database.prepare('UPDATE pages SET title = NULL WHERE id = ?').run('page-1');
+    database.prepare('UPDATE bugs SET rule_id = NULL, page_url = NULL, description = NULL WHERE id = ?').run('bug-1');
+    database.prepare("UPDATE test_results SET status = 'failed', input_json = NULL, output_json = NULL, duration_ms = NULL WHERE id = ?").run('result-1');
+    database.prepare('UPDATE sessions SET ended_at = NULL WHERE id = ?').run(sessionId);
+
+    const markdown = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).generate(sessionId);
+    expect(markdown).toContain('未命名页面');
+    expect(markdown).toContain('质量规则**：无');
+    expect(markdown).toContain('页面**：未知');
+    expect(markdown).toContain('描述**：无');
+    expect(markdown).toContain('0 毫秒');
+    expect(markdown).toContain('执行异常 1：form-submit');
+
+    const json = JSON.parse(new ReportGenerator(database, { outputDir: tempDir, format: 'json' }).generate(sessionId));
+    expect(json.会话.持续毫秒).toBeNull();
+    expect(json.测试结果[0].输入).toBeNull();
+    expect(json.测试结果[0].输出).toBeNull();
+  });
+
+  it('不完整审计日志在 Markdown 中保留错误与默认展示值', () => {
+    const { database } = setup();
+    const report = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;
+    const markdown = report.generateMarkdown(
+      { id: 's', target_name: '目标', target_url: 'https://example.com', status: 'completed', started_at: 1, ended_at: 2, phase: 'report' },
+      [], [], [], [],
+      [{ sequence: 1, timestamp: 1, source: 'script', trigger: {}, result: { error: '动作失败' } }],
+      null, [],
+    );
+    expect(markdown).toContain('未命名操作（动作失败）');
+    expect(markdown).toContain('| 1 |');
+    expect(markdown).toContain('| 成功 | 0 毫秒 |');
+  });
+
+  it('深度覆盖表对缺省百分比使用零值回退', () => {
+    const { database } = setup();
+    const generator = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;
+    const markdown = generator.coverageMarkdown({ coverage: {
+      actions: { visited: 0, blocked: 0, pending: 0 },
+      combinations: { covered: 0, total: 0 },
+      paths: { covered: 0, total: 0 },
+    } });
+    expect(markdown).toContain('| 动作 | 0 | 0 | 0 | 0 | 0.00% |');
+    expect(markdown).toContain('| 路径 | 0 | 0 | 0 | 0 | 0.00% |');
   });
 });

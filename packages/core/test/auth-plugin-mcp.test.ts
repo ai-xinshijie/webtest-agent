@@ -61,6 +61,7 @@ describe('AuthSessionManager', () => {
     failureVisible?: Promise<boolean>;
     failureError?: boolean;
     fillError?: unknown;
+    challengeSelectors?: string[];
   } = {}) {
     const password = {
       count: vi.fn(async () => options.passwordCount ?? 1),
@@ -81,6 +82,7 @@ describe('AuthSessionManager', () => {
         if (selector === 'input[type="password"]') return password;
         return {
           count: vi.fn(async () => {
+            if (options.challengeSelectors?.includes(selector)) return 1;
             if (options.usernameSelectors?.includes(selector)) return 1;
             if (selector === 'form input:not([type="password"]):not([type="hidden"])') return options.genericCount ?? 0;
             if (options.submitSelectors?.includes(selector)) return 1;
@@ -111,6 +113,27 @@ describe('AuthSessionManager', () => {
     const { page } = createAuthPage();
     const result = await new AuthSessionManager().login(page, createTarget({ username: '', password: '' }));
     expect(result).toEqual({ performed: false, success: true, reason: '目标未配置凭证，跳过登录' });
+  });
+
+  it('检测验证码或二次验证时要求人工认证，不填写登录表单', async () => {
+    const captcha = createAuthPage({ challengeSelectors: ['[data-sitekey]'] });
+    const captchaResult = await new AuthSessionManager().login(captcha.page, createTarget());
+    expect(captchaResult).toMatchObject({
+      performed: false,
+      success: false,
+      requiresManual: true,
+      reason: '检测到验证码，需要人工认证后导入登录状态',
+    });
+    expect(captcha.page.fill).not.toHaveBeenCalled();
+
+    const twoFactor = createAuthPage({ challengeSelectors: ['input[autocomplete="one-time-code"]'] });
+    const twoFactorResult = await new AuthSessionManager().login(twoFactor.page, createTarget());
+    expect(twoFactorResult).toMatchObject({
+      performed: false,
+      success: false,
+      requiresManual: true,
+      reason: '检测到二次验证，需要人工认证后导入登录状态',
+    });
   });
 
   it('没有登录表单时跳过登录', async () => {
@@ -158,6 +181,12 @@ describe('AuthSessionManager', () => {
     });
     const result = await new AuthSessionManager().login(page, createTarget());
     expect(result).toEqual({ performed: true, success: false, reason: '登录后页面仍显示登录错误' });
+  });
+
+  it('登录后的加载等待失败时仍可完成登录判定', async () => {
+    const { page } = createAuthPage({ usernameSelectors: ['input[name="username"]'] });
+    (page.waitForLoadState as any).mockRejectedValueOnce(new Error('页面仍在加载'));
+    await expect(new AuthSessionManager().login(page, createTarget())).resolves.toEqual({ performed: true, success: true });
   });
 
   it('执行异常时返回中文失败原因', async () => {
@@ -243,6 +272,37 @@ describe('AuthSessionManager', () => {
     expect(setItem).toHaveBeenCalledWith('theme', 'dark');
     delete (globalThis as any).location;
     delete (globalThis as any).localStorage;
+  });
+
+  it('认证选择器覆盖邮箱、账号、自动完成、占位符和提交按钮回退', async () => {
+    const selectors = [
+      'input[name="email"]', 'input[name="account"]', 'input[autocomplete="username"]',
+      'input[type="email"]', 'input[placeholder*="用户"]', 'input[placeholder*="账号"]', 'input[placeholder*="邮箱"]',
+    ];
+    for (const selector of selectors) {
+      const { page } = createAuthPage({ usernameSelectors: [selector] });
+      await expect((new AuthSessionManager() as any).findUsernameSelector(page)).resolves.toBe(selector);
+    }
+    for (const selector of ['form button:has-text("登录")', 'form button:has-text("Sign in")', 'form button:has-text("Login")']) {
+      const { page } = createAuthPage({ submitSelectors: [selector] });
+      await expect((new AuthSessionManager() as any).findSubmitSelector(page)).resolves.toBe(selector);
+    }
+  });
+
+  it('验证码检测忽略选择器异常并覆盖所有验证码和二次验证入口', async () => {
+    const captchaSelectors = ['iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]', '[class*="captcha" i]'];
+    for (const selector of captchaSelectors) {
+      const { page } = createAuthPage({ challengeSelectors: [selector] });
+      await expect((new AuthSessionManager() as any).detectChallenge(page)).resolves.toBe('验证码');
+    }
+    for (const selector of ['input[name*="otp" i]', 'input[name*="2fa" i]', 'input[name*="verification" i]']) {
+      const { page } = createAuthPage({ challengeSelectors: [selector] });
+      await expect((new AuthSessionManager() as any).detectChallenge(page)).resolves.toBe('二次验证');
+    }
+    const page = {
+      locator: vi.fn(() => ({ count: vi.fn().mockRejectedValue(new Error('定位失败')) })),
+    } as unknown as Page;
+    await expect((new AuthSessionManager() as any).detectChallenge(page)).resolves.toBeNull();
   });
 });
 
@@ -389,6 +449,68 @@ describe('PluginManager', () => {
     expect(existsSync(path.join(pluginPath, 'src', 'index.ts'))).toBe(true);
     expect(() => manager.create('scaffold')).toThrow('插件目录已存在');
   });
+
+  it('未构建、无初始化或无释放回调的插件具备可预期行为', async () => {
+    const manager = createManager();
+    const unbuilt = path.join(tempDir, 'plugins', 'unbuilt');
+    mkdirSync(unbuilt, { recursive: true });
+    writeFileSync(path.join(unbuilt, 'plugin.json'), JSON.stringify({
+      name: 'unbuilt', version: '1.0.0', entry: 'dist/index.js', enabled: true,
+    }), 'utf-8');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(manager.load(unbuilt)).resolves.toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith('跳过未构建插件：unbuilt');
+
+    writePlugin('minimal', {
+      code: "export default { name: 'minimal', version: '1', tools: [], async executeTool() { return null; } };",
+    });
+    await expect(manager.load(path.join(tempDir, 'plugins', 'minimal'))).resolves.toMatchObject({ name: 'minimal' });
+    await manager.disposeAll();
+    await expect(manager.executeTool('minimal.missing')).rejects.toThrow('未找到插件工具：minimal.missing');
+    warnSpy.mockRestore();
+  });
+
+  it('未先批量加载时使用受限默认上下文初始化插件', async () => {
+    const manager = createManager();
+    const messages: string[] = [];
+    writePlugin('direct', {
+      code: `export default {
+        name: 'direct', version: '1', tools: [],
+        onInit(context) { context.log('直接初始化'); },
+        async executeTool() { return null; },
+      };`,
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(message => messages.push(String(message)));
+    await manager.load(path.join(tempDir, 'plugins', 'direct'));
+    expect(messages).toContain('插件：直接初始化');
+    logSpy.mockRestore();
+  });
+
+  it('插件列表忽略无清单目录，工具匹配会跳过前置插件，Git 安装拒绝重名目录', async () => {
+    const manager = createManager();
+    mkdirSync(path.join(tempDir, 'plugins', 'no-manifest'), { recursive: true });
+    writePlugin('first', { code: "export default { name: 'first', version: '1', tools: [], async executeTool() { return null; } };" });
+    writePlugin('second', { code: "export default { name: 'second', version: '1', tools: [{ name: 'second.tool', description: 'x' }], async executeTool() { return 'ok'; } };" });
+    await manager.loadAll();
+    expect(manager.list().map(item => item.name)).toContain('first');
+    await expect(manager.executeTool('second.tool')).resolves.toBe('ok');
+    mkdirSync(path.join(tempDir, 'plugins', 'same'), { recursive: true });
+    expect(() => manager.install('https://example.com/same.git')).toThrow('插件目录已存在');
+  });
+
+  it('插件可直接使用模块命名导出作为实现', async () => {
+    const manager = createManager();
+    writePlugin('namespace', {
+      code: `
+        export const name = 'namespace';
+        export const version = '1';
+        export const tools = [{ name: 'namespace.tool', description: '命名导出工具' }];
+        export async function executeTool() { return 'namespace-result'; }
+      `,
+    });
+    await expect(manager.load(path.join(tempDir, 'plugins', 'namespace'))).resolves.toMatchObject({ name: 'namespace' });
+    await expect(manager.executeTool('namespace.tool')).resolves.toBe('namespace-result');
+  });
 });
 
 describe('MCPClient', () => {
@@ -462,5 +584,44 @@ describe('MCPClient', () => {
       timeoutMs: 5000,
     });
     await expect(exitClient.connect()).rejects.toThrow('MCP 服务已退出');
+  });
+
+  it('协议边界忽略空行和通知，支持空工具列表、请求错误与关闭拒绝', async () => {
+    const client = createClient() as any;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    client.handleChunk('  \n');
+    client.handleChunk('not-json\n');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('忽略无法解析的 MCP 消息'));
+
+    client.request = vi.fn(async () => undefined);
+    await expect(client.listTools()).resolves.toEqual([]);
+
+    const writes: string[] = [];
+    client.process = { stdin: { writable: true, write: (line: string) => writes.push(line) } };
+    await client.notify('test/notification', { value: 1 });
+    expect(JSON.parse(writes[0])).toMatchObject({ jsonrpc: '2.0', method: 'test/notification', params: { value: 1 } });
+
+    const pending = new Promise((resolve, reject) => {
+      client.pending.set('pending', { resolve, reject, timer: setTimeout(() => {}, 1000) });
+    });
+    client.rejectAll(new Error('主动关闭'));
+    await expect(pending).rejects.toThrow('主动关闭');
+    client.process = { stdin: { writable: false } };
+    expect(() => client.writeMessage({ jsonrpc: '2.0', method: 'blocked' })).toThrow('MCP 服务未连接');
+    warnSpy.mockRestore();
+  });
+
+  it('MCP 默认参数和超时配置在无参数启动时仍可受控关闭', async () => {
+    const client = new MCPClient({ command: process.execPath }) as any;
+    client.process = { stdin: { writable: true, write: vi.fn() } };
+    const pending = client.request('默认超时');
+    client.rejectAll(new Error('测试关闭'));
+    await expect(pending).rejects.toThrow('测试关闭');
+  });
+
+  it('MCP 未提供参数时使用空参数数组启动并受超时控制', async () => {
+    const client = new MCPClient({ command: process.execPath, timeoutMs: 10 });
+    await expect(client.connect()).rejects.toThrow(/MCP 请求超时：initialize|MCP 服务已退出/);
+    await client.close();
   });
 });
