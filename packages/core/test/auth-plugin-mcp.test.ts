@@ -6,6 +6,8 @@ import type { Page } from 'playwright';
 import { AuthSessionManager } from '../src/auth/AuthSessionManager.js';
 import { PluginManager } from '../src/plugin/PluginManager.js';
 import { MCPClient } from '../src/plugin/MCPClient.js';
+import { DatabaseManager } from '../src/db/Database.js';
+import { AgentLogger } from '../src/logger/AgentLogger.js';
 import type { TargetConfig } from '../src/config/types.js';
 
 vi.mock('node:child_process', async importOriginal => {
@@ -58,7 +60,7 @@ describe('AuthSessionManager', () => {
     submitSelectors?: string[];
     failureVisible?: Promise<boolean>;
     failureError?: boolean;
-    fillError?: Error;
+    fillError?: unknown;
   } = {}) {
     const password = {
       count: vi.fn(async () => options.passwordCount ?? 1),
@@ -165,6 +167,55 @@ describe('AuthSessionManager', () => {
     });
     const result = await new AuthSessionManager().login(page, createTarget());
     expect(result).toMatchObject({ performed: true, success: false, reason: '输入框被遮挡' });
+  });
+
+  it('登录和状态操作写入审计日志并处理非 Error 异常', async () => {
+    const db = new DatabaseManager(path.join(tempDir, 'auth-logs.db'));
+    db.prepare(`
+      INSERT INTO targets (id, name, url, config_json, created_at, updated_at)
+      VALUES ('demo', '演示系统', 'https://example.com', '{}', 1, 1)
+    `).run();
+    db.prepare(`
+      INSERT INTO sessions (id, target_id, status, started_at)
+      VALUES ('session-1', 'demo', 'running', 1)
+    `).run();
+    const logger = new AgentLogger(db, 'session-1', { consoleOutput: false });
+    const manager = new AuthSessionManager();
+    manager.setLogger(logger);
+
+    const failing = createAuthPage({
+      usernameSelectors: ['input[name="username"]'],
+      fillError: '页面已跳转',
+    });
+    const failed = await manager.login(failing.page, createTarget({ usernameHint: '演示账号' }));
+    expect(failed).toMatchObject({ performed: true, success: false, reason: '页面已跳转' });
+
+    const succeeding = createAuthPage({ usernameSelectors: ['input[name="username"]'] });
+    expect(await manager.login(succeeding.page, createTarget())).toMatchObject({ performed: true, success: true });
+
+    const statePath = path.join(tempDir, 'state.json');
+    await manager.saveState(succeeding.page, statePath);
+    writeFileSync(statePath, JSON.stringify({
+      cookies: [],
+      origins: [{ origin: 'https://example.com', localStorage: [{ name: 'theme', value: 'dark' }] }],
+    }), 'utf-8');
+    await manager.restoreState(succeeding.page, statePath);
+
+    const context = succeeding.page.context() as any;
+    const initScript = context.addInitScript.mock.calls.at(-1)[0] as (origins: any[]) => void;
+    const setItem = vi.fn();
+    (globalThis as any).location = { origin: 'https://example.com' };
+    (globalThis as any).localStorage = { setItem };
+    initScript([{ origin: 'https://other.test', localStorage: [{ name: 'ignored', value: 'x' }] }]);
+    initScript([{ origin: 'https://example.com', localStorage: [{ name: 'theme', value: 'dark' }] }]);
+    expect(setItem).toHaveBeenCalledWith('theme', 'dark');
+    delete (globalThis as any).location;
+    delete (globalThis as any).localStorage;
+
+    expect(logger.getTimeline().some(log => log.action.type === 'login')).toBe(true);
+    expect(logger.getTimeline().some(log => log.action.type === 'save-auth-state')).toBe(true);
+    expect(logger.getTimeline().some(log => log.action.type === 'restore-auth-state')).toBe(true);
+    db.close();
   });
 
   it('保存和恢复登录状态', async () => {

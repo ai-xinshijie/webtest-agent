@@ -85,6 +85,16 @@ describe('BrowserManager', () => {
     }));
   });
 
+  it('支持 WebKit 内置浏览器', async () => {
+    createExecutable('webkitbrowser.exe');
+    const manager = new BrowserManager(tempDir);
+
+    await manager.launch({ browserType: 'webkit' });
+    expect(mocks.webkitLaunch).toHaveBeenCalledWith(expect.objectContaining({
+      executablePath: path.join(tempDir, 'webkitbrowser.exe'),
+    }));
+  });
+
   it('支持递归查找 Linux 可执行文件', () => {
     const executable = createExecutable(path.join('chromium-1208', '1', '2', '3', '4', '5', 'chrome'));
     const manager = new BrowserManager(tempDir);
@@ -108,6 +118,20 @@ describe('BrowserManager', () => {
     expect(mocks.firefoxLaunch).toHaveBeenCalledWith(expect.objectContaining({
       executablePath: path.join(tempDir, 'firefox.exe'),
     }));
+  });
+
+  it('使用默认上下文配置', async () => {
+    createExecutable('chrome.exe');
+    const manager = new BrowserManager(tempDir);
+    const browser = mocks.browser as unknown as { newContext: typeof mocks.chromiumLaunch };
+    browser.newContext = vi.fn(async () => mocks.context);
+
+    await manager.createContext('session-default');
+    expect(browser.newContext).toHaveBeenCalledWith({
+      viewport: { width: 1920, height: 1080 },
+      storageState: undefined,
+      recordVideo: undefined,
+    });
   });
 
   it('创建上下文、页面并关闭指定会话', async () => {
@@ -138,6 +162,14 @@ describe('BrowserManager', () => {
     expect(mocks.context.close).toHaveBeenCalledTimes(1);
     expect(manager.getSessionIds()).toEqual([]);
     await expect(manager.createPage('session-1')).rejects.toThrow('未找到会话的浏览器上下文：session-1');
+  });
+
+  it('跳过没有可执行文件的匹配目录', () => {
+    mkdirSync(path.join(tempDir, 'chromium-a-empty'), { recursive: true });
+    createExecutable(path.join('chromium-b', 'chrome'));
+    const manager = new BrowserManager(tempDir);
+
+    expect(manager.isBrowserAvailable('chromium')).toBe(true);
   });
 
   it('缺少浏览器时返回中文错误', async () => {

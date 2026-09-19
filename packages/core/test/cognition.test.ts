@@ -53,13 +53,28 @@ function createObservation(overrides: Partial<StructuredObservation> = {}): Stru
 describe('classifyComponent', () => {
   it('按语义标签、ARIA 和组件库类名分类组件', () => {
     expect(classifyComponent(createComponent({ tag: 'button' })).type).toBe('button');
+    expect(classifyComponent(createComponent({ tag: 'a' })).type).toBe('link');
+    expect(classifyComponent(createComponent({ tag: 'textarea' })).type).toBe('textarea');
+    expect(classifyComponent(createComponent({ tag: 'select' })).type).toBe('select');
+    expect(classifyComponent(createComponent({ tag: 'form' })).type).toBe('form');
+    expect(classifyComponent(createComponent({ tag: 'table' })).type).toBe('table');
     expect(classifyComponent(createComponent({ tag: 'input', type: 'checkbox' })).type).toBe('checkbox');
     expect(classifyComponent(createComponent({ tag: 'input', type: 'radio' })).type).toBe('radio');
     expect(classifyComponent(createComponent({ tag: 'input', type: 'file' })).type).toBe('fileupload');
+    expect(classifyComponent(createComponent({ tag: 'input' })).type).toBe('input');
     expect(classifyComponent(createComponent({ role: 'dialog' })).type).toBe('modal');
     expect(classifyComponent(createComponent({ role: 'tab' })).type).toBe('tab');
+    expect(classifyComponent(createComponent({ role: 'combobox' })).type).toBe('select');
+    expect(classifyComponent(createComponent({ role: 'menuitem' })).type).toBe('dropdown');
+    expect(classifyComponent(createComponent({ classes: ['ant-select'] })).type).toBe('select');
+    expect(classifyComponent(createComponent({ classes: ['el-select'] })).type).toBe('select');
     expect(classifyComponent(createComponent({ classes: ['ant-collapse'] })).type).toBe('accordion');
+    expect(classifyComponent(createComponent({ classes: ['ant-modal'] })).type).toBe('modal');
+    expect(classifyComponent(createComponent({ classes: ['el-dialog'] })).type).toBe('modal');
+    expect(classifyComponent(createComponent({ classes: ['ant-tabs-tab'] })).type).toBe('tab');
     expect(classifyComponent(createComponent({ classes: ['ant-pagination'] })).type).toBe('pagination');
+    expect(classifyComponent(createComponent({ classes: ['el-pagination'] })).type).toBe('pagination');
+    expect(classifyComponent(createComponent({ classes: ['ant-picker'] })).type).toBe('datepicker');
     expect(classifyComponent(createComponent({
       clickability: {
         score: 0.6,
@@ -146,6 +161,27 @@ describe('质量规则', () => {
     });
     expect(passNoForm.verdict).toBe('pass');
     expect(passValidation.verdict).toBe('pass');
+
+    const passButtonTarget = await QR002.check({
+      before: createObservation(),
+      after: createObservation(),
+      action: { type: 'click', target: 'button' },
+      networkLog: [],
+      consoleLog: [],
+      componentModel: null,
+      memory: null,
+    });
+    const passClassValidation = await QR002.check({
+      before: createObservation(),
+      after: createObservation({ components: [createComponent({ classes: ['is-invalid'] })] }),
+      action: { type: 'click', target: 'submit' },
+      networkLog: [{ url: 'https://example.com/api/submit', method: 'POST' }],
+      consoleLog: [],
+      componentModel: null,
+      memory: null,
+    });
+    expect(passButtonTarget.verdict).toBe('pass');
+    expect(passClassValidation.verdict).toBe('pass');
   });
 
   it('QR006：控制台错误、服务端错误或白屏时失败', async () => {
@@ -169,6 +205,38 @@ describe('质量规则', () => {
     });
     expect(jsError.verdict).toBe('fail');
     expect(serverError.verdict).toBe('fail');
+
+    const typeError = await QR006.check({
+      before: createObservation(),
+      after: createObservation({ components: [createComponent()] }),
+      action: { type: 'click', target: '#a' },
+      networkLog: [],
+      consoleLog: ['TypeError: x is not a function'],
+      componentModel: null,
+      memory: null,
+    });
+    const referenceError = await QR006.check({
+      before: createObservation(),
+      after: createObservation({ components: [createComponent()] }),
+      action: { type: 'click', target: '#a' },
+      networkLog: [],
+      consoleLog: ['ReferenceError: x is not defined'],
+      componentModel: null,
+      memory: null,
+    });
+    const blankPage = await QR006.check({
+      before: createObservation(),
+      after: createObservation(),
+      action: { type: 'click', target: '#a' },
+      networkLog: [],
+      consoleLog: [],
+      componentModel: null,
+      memory: null,
+    });
+    expect(typeError.verdict).toBe('fail');
+    expect(referenceError.verdict).toBe('fail');
+    expect(blankPage.verdict).toBe('fail');
+    expect(blankPage.violation?.description).toContain('页面空白');
   });
 
   it('QR006：页面有内容且无异常时通过', async () => {

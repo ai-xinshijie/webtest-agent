@@ -41,6 +41,15 @@ describe('ExplorationFrontier', () => {
     expect(coverage.percentage).toBe(50);
   });
 
+  it('空 frontier 覆盖率为零', () => {
+    expect(new ExplorationFrontier().getCoverage()).toEqual({
+      visited: 0,
+      pending: 0,
+      blocked: 0,
+      percentage: 0,
+    });
+  });
+
   it('不重复加入已访问或已阻断的队列项', () => {
     const frontier = new ExplorationFrontier();
     frontier.enqueue('page', 'button', 'click');
@@ -98,6 +107,20 @@ describe('AgentSelfHealer', () => {
     }, { operationName: '持续超时', sessionId: 'session-1' })).rejects.toThrow('timeout');
     await vi.advanceTimersByTimeAsync(9000);
     await exhaustedExpectation;
+    vi.useRealTimers();
+  });
+
+  it('重试延迟缺失时使用默认值', async () => {
+    vi.useFakeTimers();
+    const healer = new AgentSelfHealer();
+    let attempts = 0;
+    const recovered = (healer as any).retryWithBackoff(async () => {
+      if (attempts++ === 0) throw new Error('第一次失败');
+      return '默认延迟后成功';
+    }, 2, []);
+
+    await vi.advanceTimersByTimeAsync(10000);
+    await expect(recovered).resolves.toBe('默认延迟后成功');
     vi.useRealTimers();
   });
 
@@ -196,6 +219,17 @@ describe('ScreenshotManager', () => {
 
     expect(await manager.capture(page, 'initial')).toBeNull();
     expect(await manager.captureFullPage(page, 'initial')).toBeNull();
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const nonErrorPage = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      screenshot: vi.fn().mockRejectedValue('画布不可用'),
+    } as unknown as Page;
+
+    expect(await manager.capture(nonErrorPage, 'initial')).toBeNull();
+    expect(await manager.captureFullPage(nonErrorPage, 'initial')).toBeNull();
+    expect(warnSpy.mock.calls.map(call => call.join(' ')).join('\n')).toContain('画布不可用');
+    warnSpy.mockRestore();
   });
 });
 

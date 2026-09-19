@@ -226,6 +226,27 @@ describe('MemoryManager', () => {
 });
 
 describe('ConfigManager', () => {
+  it('兼容顶层浏览器字段、缺少模型并返回空目标列表', () => {
+    mkdirSync(path.join(tempDir, '.wta'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'config.json'), JSON.stringify({
+      defaultBrowser: 'firefox',
+      headless: false,
+      parallel: 3,
+    }), 'utf-8');
+    const manager = new ConfigManager(tempDir);
+
+    expect(manager.load()).toMatchObject({
+      defaultBrowser: 'firefox',
+      headless: false,
+      parallel: 3,
+    });
+    expect(manager.listTargets()).toEqual([]);
+
+    const db = new DatabaseManager(path.join(tempDir, 'wta.db'));
+    db.close();
+    db.close();
+  });
+
   it('加载默认配置、旧版浏览器配置和目标列表', () => {
     mkdirSync(path.join(tempDir, '.wta', 'targets'), { recursive: true });
     writeFileSync(path.join(tempDir, '.wta', 'config.json'), JSON.stringify({
@@ -259,6 +280,17 @@ describe('ConfigManager', () => {
     expect(manager.loadTarget('演示').url).toBe('https://example.com/home');
   });
 
+  it('目标列表按名称排序', () => {
+    const dir = path.join(tempDir, '.wta', 'targets');
+    mkdirSync(dir, { recursive: true });
+    for (const name of ['zeta', 'alpha']) {
+      writeFileSync(path.join(dir, `${name}.json`), JSON.stringify({ name }), 'utf-8');
+    }
+
+    expect(new ConfigManager(tempDir).listTargets().map(target => target.name))
+      .toEqual(['alpha', 'zeta']);
+  });
+
   it('目标不存在时返回中文错误', () => {
     const manager = new ConfigManager(tempDir);
     expect(() => manager.loadTarget('不存在')).toThrow('未找到测试目标：不存在');
@@ -276,8 +308,13 @@ describe('ComponentRevealer', () => {
         captureCount++;
         return {
           components: captureCount === 1
-            ? [{ selector: '#before', tag: 'button' }]
-            : [{ selector: '#before', tag: 'button' }, { selector: '#after', tag: 'input' }],
+            ? [{ selector: '#before', tag: 'button' }, { selector: null, tag: 'base' }]
+            : [
+              { selector: '#before', tag: 'button' },
+              { selector: null, tag: 'base' },
+              { selector: '#after', tag: 'input' },
+              { selector: null, tag: 'revealed-tag' },
+            ],
           title: '演示页面',
           forms: [],
           dialogs: 0,
@@ -302,9 +339,24 @@ describe('ComponentRevealer', () => {
     expect(hover).toHaveBeenCalled();
     expect(result).toEqual({
       interactions: 2,
-      revealedComponents: 1,
-      revealedSelectors: ['#after'],
+      revealedComponents: 2,
+      revealedSelectors: ['#after', 'revealed-tag'],
     });
+  });
+
+  it('关闭临时层时忽略键盘和鼠标异常', async () => {
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn(async () => ({
+        components: [], title: '演示页面', forms: [], dialogs: 0, loadingOverlays: 0,
+      })),
+      locator: vi.fn(() => ({ all: async () => [] })),
+      keyboard: { press: vi.fn().mockRejectedValue(new Error('键盘不可用')) },
+      mouse: { click: vi.fn().mockRejectedValue(new Error('鼠标不可用')) },
+    } as unknown as Page;
+
+    const result = await new ComponentRevealer().reveal(page);
+    expect(result).toEqual({ interactions: 0, revealedComponents: 0, revealedSelectors: [] });
   });
 
   it('通过审计日志执行组件揭示', async () => {
@@ -321,7 +373,7 @@ describe('ComponentRevealer', () => {
     const logger = new AgentLogger(db, 'session-1', { consoleOutput: false });
     const result = await new ComponentRevealer(logger).reveal(page, { phase: 'explore' });
 
-    expect(result.revealedComponents).toBe(1);
+    expect(result.revealedComponents).toBe(2);
     expect(logger.getTimeline().some(log => log.action.type === 'reveal')).toBe(true);
     db.close();
   });
@@ -364,18 +416,42 @@ describe('NetworkFaultInjector', () => {
 
     for (const fault of faults) await injector.apply(page, fault);
     await routes[0]!.handler(createRoute('document'));
+    await routes[0]!.handler(createRoute('xhr'));
     await routes[1]!.handler(createRoute('xhr'));
     await routes[2]!.handler(createRoute('fetch'));
     await routes[3]!.handler(createRoute('xhr'));
     await routes[4]!.handler(createRoute('fetch'));
     await routes[5]!.handler(createRoute('xhr'));
 
-    expect(injector.getActiveFaults()).toHaveLength(6);
+    const unknownFault = { type: 'unknown', urlPattern: '**/unknown' } as any;
+    await injector.apply(page, unknownFault);
+    const unknownRoute = createRoute('xhr');
+    await routes.at(-1)!.handler(unknownRoute);
+    expect(unknownRoute.continue).toHaveBeenCalled();
+
+    expect(injector.getActiveFaults()).toHaveLength(7);
     await injector.restore(page, faults[0]);
-    expect(injector.getActiveFaults()).toHaveLength(5);
+    expect(injector.getActiveFaults()).toHaveLength(6);
     await injector.restoreAll(page);
     expect(injector.getActiveFaults()).toHaveLength(0);
     expect(page.unroute).toHaveBeenCalled();
+  });
+
+  it('慢请求和超时使用默认延迟', async () => {
+    vi.useFakeTimers();
+    const { page, routes } = createPage();
+    const injector = new NetworkFaultInjector();
+
+    await injector.apply(page, { type: 'slow', urlPattern: '**/slow-default' });
+    await injector.apply(page, { type: 'timeout', urlPattern: '**/timeout-default' });
+
+    const slow = routes[0]!.handler(createRoute('xhr'));
+    await vi.advanceTimersByTimeAsync(3000);
+    await slow;
+    const timeout = routes[1]!.handler(createRoute('xhr'));
+    await vi.advanceTimersByTimeAsync(30000);
+    await timeout;
+    vi.useRealTimers();
   });
 
   it('网络故障操作写入结构化日志', async () => {
