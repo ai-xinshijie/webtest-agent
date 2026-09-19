@@ -92,6 +92,9 @@ export class AgentLogger {
     `).get(sessionId) as { max_sequence: number } | undefined;
 
     this.sequence = current?.max_sequence ?? 0;
+    this.logs = this.db.prepare(`
+      SELECT log_json FROM agent_logs WHERE session_id = ? ORDER BY sequence ASC
+    `).all(sessionId).map(row => JSON.parse((row as { log_json: string }).log_json));
     this.insertStatement = this.db.prepare(`
       INSERT INTO agent_logs (id, session_id, timestamp, sequence, source, log_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)

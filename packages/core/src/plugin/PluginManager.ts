@@ -91,7 +91,7 @@ export class PluginManager {
     }
 
     const imported = await import(pathToFileURL(entryPath).href);
-    const plugin = (imported.default ?? imported) as WtaPlugin;
+    const plugin = (imported.default ?? imported.plugin ?? imported) as WtaPlugin;
     if (plugin.name !== manifest.name) {
       throw new Error(`插件名称与清单不一致：${manifest.name}`);
     }
@@ -178,6 +178,7 @@ export class PluginManager {
       version: '0.1.0',
       type: 'module',
       private: true,
+      dependencies: { '@wta/core': 'workspace:*' },
       scripts: { build: 'tsc -p tsconfig.json' },
     }, null, 2), 'utf-8');
 

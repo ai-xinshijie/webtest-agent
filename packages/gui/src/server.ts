@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -216,7 +216,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
           name: file,
           path: filePath,
           format: file.endsWith('.json') ? 'json' : 'md',
-          size: 0,
+          size: statSync(filePath).size,
         };
       })
       .reverse();
@@ -232,6 +232,12 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
   });
 
   const stateFile = path.join(rootDir, '.wta', 'daemon.json');
+  let databaseClosed = false;
+  const closeDatabase = () => {
+    if (databaseClosed) return;
+    db.close();
+    databaseClosed = true;
+  };
   fastify.get('/api/plugins', async () => {
     const manager = new PluginManager(path.join(rootDir, '.wta', 'plugins'));
     return manager.list();
@@ -242,6 +248,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
     if (existsSync(stateFile)) rmSync(stateFile);
     await orchestrator?.close();
     await fastify.close();
+    closeDatabase();
   });
 
   mkdirSync(path.dirname(stateFile), { recursive: true });
@@ -249,6 +256,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
     if (existsSync(stateFile)) rmSync(stateFile);
     await orchestrator?.close();
     await fastify.close();
+    closeDatabase();
   };
 
   await fastify.listen({ port, host });

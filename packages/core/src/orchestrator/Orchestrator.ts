@@ -407,7 +407,6 @@ export class Orchestrator {
         visited: acc.actions.visited + item.coverage.actions.visited,
         blocked: acc.actions.blocked + item.coverage.actions.blocked,
         pending: acc.actions.pending + item.coverage.actions.pending,
-        skipped: acc.actions.skipped + item.coverage.actions.skipped,
         percentage: 0,
       },
       combinations: {
@@ -421,13 +420,13 @@ export class Orchestrator {
         percentage: 0,
       },
     }), {
-      actions: { visited: 0, blocked: 0, pending: 0, skipped: 0, percentage: 0 },
+      actions: { visited: 0, blocked: 0, pending: 0, percentage: 0 },
       combinations: { covered: 0, total: 0, percentage: 0 },
       paths: { covered: 0, total: 0, percentage: 0 },
     });
 
     const actionTotal = coverage.actions.visited + coverage.actions.blocked
-      + coverage.actions.pending + coverage.actions.skipped;
+      + coverage.actions.pending;
     coverage.actions.percentage = actionTotal === 0
       ? 100
       : (coverage.actions.visited / actionTotal) * 100;

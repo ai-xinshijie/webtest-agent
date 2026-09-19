@@ -220,7 +220,7 @@ export class TestEngine {
     const factors = components.map(row => this.getActions(row.type).slice(0, 3));
     const strength = this.options.depth === 'deep' ? 3 : this.options.depth === 'standard' ? 2 : 1;
     const result = this.covering.generate(factors, strength);
-    this.tracker.setExpectedCombinations(result.totalCombinations);
+    this.tracker.setExpectedCombinations(result.rows.length);
 
     for (const rowValues of result.rows) {
       const itemKey = [
@@ -401,7 +401,7 @@ export class TestEngine {
     if (this.options.runMode === 'retest' || this.options.runMode === 'fresh') return false;
 
     const status = this.memory.getTestedStatus(this.options.targetId, itemKey);
-    if (this.options.runMode === 'regression') return status !== 'failed';
+    if (this.options.runMode === 'regression') return status !== null && status !== 'failed';
     if (this.options.runMode === 'continue') return status !== null;
     return status === 'passed' || status === 'skipped';
   }

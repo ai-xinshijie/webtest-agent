@@ -455,8 +455,8 @@ export class MemoryManager {
         const old = testedItems.get(key);
         if (!old || item.lastTestedAt > old.lastTestedAt) testedItems.set(key, item);
       }
-      for (const rule of input.rules) rules.set(rule.statement, rule);
-      for (const pattern of input.patterns) patterns.set(pattern.pattern, pattern);
+      for (const rule of input.rules) rules.set(`${rule.targetId}:${rule.statement}`, rule);
+      for (const pattern of input.patterns) patterns.set(`${pattern.targetId}:${pattern.pattern}`, pattern);
       for (const summary of input.summaries) summaries.set(summary.sessionId, summary);
     }
 

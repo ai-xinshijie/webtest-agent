@@ -147,23 +147,13 @@ export class BrowserManager {
 
   private getExecutableNames(browserType: BrowserType, preferHeadless: boolean): string[] {
     if (browserType === 'chromium') {
-      return process.platform === 'win32'
-        ? preferHeadless
-          ? ['chrome-headless-shell.exe', 'chrome.exe']
-          : ['chrome.exe', 'chrome-headless-shell.exe']
-        : process.platform === 'darwin'
-          ? preferHeadless
-            ? ['chrome-headless-shell', 'Chromium', 'chrome']
-            : ['Chromium', 'chrome', 'chrome-headless-shell']
-          : preferHeadless
-            ? ['chrome-headless-shell', 'chrome']
-            : ['chrome', 'chrome-headless-shell'];
+      const headlessNames = ['chrome-headless-shell.exe', 'chrome-headless-shell'];
+      const fullNames = ['chrome.exe', 'chrome', 'Chromium'];
+      return preferHeadless ? [...headlessNames, ...fullNames] : [...fullNames, ...headlessNames];
     }
     if (browserType === 'firefox') {
-      return process.platform === 'win32' ? ['firefox.exe'] : ['firefox'];
+      return ['firefox.exe', 'firefox'];
     }
-    return process.platform === 'win32'
-      ? ['webkitbrowser.exe', 'Playwright.exe', 'webkit2png.exe']
-      : ['webkitbrowser', 'Playwright', 'webkit2png'];
+    return ['webkitbrowser.exe', 'webkitbrowser', 'Playwright.exe', 'Playwright', 'webkit2png.exe', 'webkit2png'];
   }
 }
