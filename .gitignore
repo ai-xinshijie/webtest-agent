@@ -38,6 +38,9 @@ Thumbs.db
 
 # Test coverage
 coverage/
+# 核心覆盖策略源码，不属于测试生成的 coverage 输出。
+!packages/core/src/coverage/
+!packages/core/src/coverage/CoverageGuarantee.ts
 .nyc_output/
 
 # Temporary
