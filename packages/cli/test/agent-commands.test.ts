@@ -14,8 +14,10 @@ import { AgentLogger, DatabaseManager } from '@wta/core';
 let tempDir = '';
 let originalCwd = '';
 let handle: GuiServerHandle | null = null;
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   originalCwd = process.cwd();
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-agent-cli-'));
   process.chdir(tempDir);
@@ -27,6 +29,7 @@ afterEach(async () => {
     handle = null;
   }
   vi.unstubAllGlobals();
+  Object.defineProperty(process, 'platform', platformDescriptor);
   process.chdir(originalCwd);
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = '';

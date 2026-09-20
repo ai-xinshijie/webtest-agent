@@ -18,6 +18,8 @@ let originalCwd = '';
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
+  // 默认验证 Windows 无需安装 Linux 依赖的分支；Linux 场景在专用用例中覆盖。
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   originalCwd = process.cwd();
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-install-cli-'));
   process.chdir(tempDir);

@@ -38,6 +38,8 @@ let tempDir = '';
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
+  // 大部分用例验证 Windows 内置浏览器布局；Linux 分支在对应测试中单独覆盖。
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-browser-'));
   mocks.browser.isConnected.mockReset().mockReturnValue(true);
   mocks.browser.close.mockClear();

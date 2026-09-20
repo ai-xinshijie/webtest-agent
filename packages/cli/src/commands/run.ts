@@ -100,6 +100,7 @@ export const runCommand = new Command('run')
         console.log(`  状态：${session.status}`);
         console.log(`  报告：${session.reportPaths?.join('、') ?? '未生成'}`);
         process.exit(session.status === 'failed' ? 1 : 0);
+        return;
       }
 
       const baseUrl = await ensureDaemon();

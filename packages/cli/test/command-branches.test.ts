@@ -19,6 +19,8 @@ const versionDescriptor = Object.getOwnPropertyDescriptor(process, 'version')!;
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
+  // Windows 浏览器目录布局由详细模式用例验证；Linux 场景在下方专用用例中覆盖。
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   originalCwd = process.cwd();
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-cli-branches-'));
   process.chdir(tempDir);
