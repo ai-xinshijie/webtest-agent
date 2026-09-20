@@ -112,7 +112,7 @@ function createEngine(
 }
 
 describe('TestEngine', () => {
-  it('动作测试记录通过、失败和记忆跳过，失败仍计入覆盖', async () => {
+  it('历史记录缺少页面指纹时强制重测，失败仍计入覆盖', async () => {
     const db = createDatabase();
     addPage(db, 'page-1', 'https://example.com/page');
     addComponent(db, 'button-1', 'page-1', 'button', '#button-1');
@@ -135,13 +135,13 @@ describe('TestEngine', () => {
       { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' },
     ]);
 
-    expect(result.executedActions).toBe(4);
-    expect(result.skippedActions).toBe(1);
-    expect(result.coverage.actions).toEqual({ visited: 5, blocked: 0, pending: 0, percentage: 100, resolvedPercentage: 100 });
+    expect(result.executedActions).toBe(5);
+    expect(result.skippedActions).toBe(0);
+    expect(result.coverage.actions).toEqual({ visited: 5, reused: 0, blocked: 0, pending: 0, percentage: 100, resolvedPercentage: 100 });
 
     const statuses = (db.prepare('SELECT status, COUNT(*) AS count FROM test_results GROUP BY status').all() as any[])
       .reduce((acc, row) => ({ ...acc, [row.status]: row.count }), {});
-    expect(statuses).toEqual({ passed: 3, failed: 1, skipped: 1 });
+    expect(statuses).toEqual({ passed: 4, failed: 1 });
     expect(memory.getTestedItems('demo')).toHaveLength(5);
     db.close();
   });
@@ -164,15 +164,15 @@ describe('TestEngine', () => {
     expect(executor.executeAction).not.toHaveBeenCalled();
     expect(result.executedActions).toBe(0);
     expect(result.skippedActions).toBe(4);
-    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 4, pending: 0, percentage: 0, resolvedPercentage: 100 });
+    expect(result.coverage.actions).toEqual({ visited: 0, reused: 0, blocked: 4, pending: 0, percentage: 0, resolvedPercentage: 100 });
     const reasons = (db.prepare('SELECT output_json FROM test_results').all() as Array<{ output_json: string }>)
       .map(row => JSON.parse(row.output_json).reason)
       .sort();
     expect(reasons).toEqual([
-      '组件当前不可见，已阻断动作执行',
-      '组件当前不可见，已阻断动作执行',
-      '组件当前不可见，已阻断动作执行',
-      '组件当前已禁用，已阻断动作执行',
+      '组件当前不可见，尚未获得可达性探测能力',
+      '组件当前不可见，尚未获得可达性探测能力',
+      '组件当前不可见，尚未获得可达性探测能力',
+      '组件当前已禁用，需要满足业务前置条件后重测',
     ].sort());
     db.close();
   });
@@ -200,8 +200,8 @@ describe('TestEngine', () => {
     expect(first.executedActions).toBe(6);
     expect(first.executedCombinations).toBe(5);
     expect(first.executedPaths).toBe(1);
-    expect(first.coverage.combinations).toEqual({ covered: 5, blocked: 0, total: 5, percentage: 100, resolvedPercentage: 100 });
-    expect(first.coverage.paths).toEqual({ covered: 1, blocked: 0, total: 1, percentage: 100, resolvedPercentage: 100 });
+    expect(first.coverage.combinations).toEqual({ covered: 5, reused: 0, blocked: 0, total: 5, percentage: 100, resolvedPercentage: 100 });
+    expect(first.coverage.paths).toEqual({ covered: 1, reused: 0, blocked: 0, total: 1, percentage: 100, resolvedPercentage: 100 });
 
     const second = await createEngine(db, memory, createExecutor(), {
       runMode: 'continue',
@@ -214,10 +214,10 @@ describe('TestEngine', () => {
     expect(second.skippedActions).toBe(6);
     expect(second.executedCombinations).toBe(0);
     expect(second.skippedCombinations).toBe(5);
-    expect(second.executedPaths).toBe(0);
-    expect(second.skippedPaths).toBe(1);
-    expect(second.coverage.actions.percentage).toBe(100);
-    expect(second.coverage.combinations.percentage).toBe(100);
+    expect(second.executedPaths).toBe(1);
+    expect(second.skippedPaths).toBe(0);
+    expect(second.coverage.actions).toMatchObject({ visited: 0, reused: 6, percentage: 0, resolvedPercentage: 100 });
+    expect(second.coverage.combinations).toMatchObject({ covered: 0, reused: 5, percentage: 0, resolvedPercentage: 100 });
     expect(second.coverage.paths.percentage).toBe(100);
     db.close();
   });
@@ -264,6 +264,37 @@ describe('TestEngine', () => {
     }).run(createPage(), pages);
     expect(continueRun.executedActions).toBe(0);
     expect(continueRun.skippedActions).toBe(3);
+    db.close();
+  });
+
+  it('仅在页面指纹一致时复用通过动作，页面变更后强制重测', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'button-1', 'page-1', 'button', '#button-1');
+    const memory = new MemoryManager(db);
+    const page = createPage();
+    const first = await createEngine(db, memory, createExecutor(), {
+      runMode: 'fresh', phase: 'test', enableChaos: false,
+    }).run(page, [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(first.executedActions).toBe(3);
+
+    const samePage = createPage();
+    const reused = await createEngine(db, memory, createExecutor(), {
+      runMode: 'continue', phase: 'test', enableChaos: false,
+    }).run(samePage, [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(reused.executedActions).toBe(0);
+    expect(reused.coverage.actions).toMatchObject({ reused: 3, percentage: 0, resolvedPercentage: 100 });
+
+    const changedPage = createPage();
+    (changedPage.evaluate as any).mockResolvedValue({
+      components: [{ selector: '#visible', tag: 'button' }, { selector: '#new', tag: 'input' }],
+      title: '演示页面', forms: [], dialogs: 0, loadingOverlays: 0,
+    });
+    const retested = await createEngine(db, memory, createExecutor(), {
+      runMode: 'continue', phase: 'test', enableChaos: false,
+    }).run(changedPage, [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(retested.executedActions).toBe(3);
+    expect(retested.coverage.actions).toMatchObject({ visited: 3, reused: 0, percentage: 100 });
     db.close();
   });
 
@@ -343,7 +374,7 @@ describe('TestEngine', () => {
 
     expect(executor.executeAction).not.toHaveBeenCalled();
     expect(page.goto).toHaveBeenCalledTimes(3);
-    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 3, pending: 0, percentage: 0, resolvedPercentage: 100 });
+    expect(result.coverage.actions).toEqual({ visited: 0, reused: 0, blocked: 3, pending: 0, percentage: 0, resolvedPercentage: 100 });
     const blocked = db.prepare('SELECT status, output_json FROM test_results').all() as Array<{ status: string; output_json: string }>;
     expect(blocked).toHaveLength(3);
     expect(blocked.every(item => item.status === 'skipped' && JSON.parse(item.output_json).reason.includes('页面不可访问'))).toBe(true);
@@ -386,7 +417,7 @@ describe('TestEngine', () => {
     expect(result.executedActions).toBe(6);
     expect(result.executedCombinations).toBe(0);
     expect(result.skippedCombinations).toBe(5);
-    expect(result.coverage.combinations).toEqual({ covered: 0, blocked: 5, total: 5, percentage: 0, resolvedPercentage: 100 });
+    expect(result.coverage.combinations).toEqual({ covered: 0, reused: 0, blocked: 5, total: 5, percentage: 0, resolvedPercentage: 100 });
     const combinations = db.prepare("SELECT status FROM test_results WHERE test_type = 'combination-1way'").all() as Array<{ status: string }>;
     expect(combinations).toHaveLength(5);
     expect(combinations.every(item => item.status === 'skipped')).toBe(true);
@@ -520,6 +551,67 @@ describe('TestEngine', () => {
     });
     expect(db.prepare('SELECT COUNT(*) AS count FROM bugs').get()).toEqual({ count: 2 });
     expect(observation).toBeTruthy();
+    db.close();
+  });
+
+  it('输入类动作不套用页面级反馈规则，避免把字段编辑误报为缺陷', async () => {
+    const db = createDatabase();
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    await engine.evaluateActionEvidence({
+      before: { components: [], url: 'https://example.com', loadingOverlayCount: 0 },
+      after: { components: [], url: 'https://example.com', loadingOverlayCount: 0 },
+      action: 'fill', selector: '#field', pageUrl: 'https://example.com',
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM bugs WHERE rule_id = 'QR001'").get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('语义断言失败时单独持久化为可追溯问题', () => {
+    const db = createDatabase();
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    engine.persistOracleViolations([
+      { name: '非法提交校验', passed: false, detail: '写请求未被校验阻断' },
+      { name: '页面稳定性', passed: true, detail: '正常' },
+    ], 'https://example.com/page', 'component-1');
+    expect(db.prepare('SELECT title, rule_id, component_id FROM bugs').get()).toEqual({
+      title: '语义断言失败：非法提交校验', rule_id: 'ORACLE:非法提交校验', component_id: 'component-1',
+    });
+    db.close();
+  });
+
+  it('业务范围、组合指纹与状态快照辅助分支均可安全处理', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'shell', 'page-1', 'button', '#shell', { visible: true, enabled: true, scope: 'shell' });
+    addComponent(db, 'unknown', 'page-1', 'button', '#unknown', { visible: true, enabled: true, scope: 'unknown' });
+    const engine = createEngine(db, new MemoryManager(db), createExecutor(), {
+      runMode: 'fresh', phase: 'combo', enablePaths: false, enableChaos: false,
+    }) as any;
+    expect(engine.getTestableComponents('page-1').map((row: any) => row.id)).toEqual(['unknown']);
+    expect(engine.getTestableComponents('none')).toEqual([]);
+    expect(engine.fingerprint({ url: 'u', title: 't', components: [{ tag: 'button', role: null } as any] })).toContain('button');
+    expect(engine.getUnavailableReason({ state: { visible: false, enabled: true } })).toContain('不可见');
+    expect(engine.getUnavailableReason({ state: { visible: true, enabled: false } })).toContain('禁用');
+    const combo = await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(combo.executedCombinations).toBe(0);
+    db.close();
+  });
+
+  it('兼容缺少组件状态的历史数据，并在组合指纹未缓存时继续完成测试', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    db.prepare('INSERT INTO components (id, target_id, page_id, type, selector, label, state_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy', 'demo', 'page-1', 'button', '#legacy', '历史按钮', null, 1, 1);
+    addComponent(db, 'button-2', 'page-1', 'button', '#button-2');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor(), {
+      runMode: 'fresh', phase: 'combo', enablePaths: false, enableChaos: false,
+    }) as any;
+    expect(engine.getTestableComponents('page-1')).toHaveLength(2);
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('未缓存指纹');
+    await engine.testPageCombinations(createPage(), {
+      id: 'page-1', url_pattern: 'https://example.com/page', title: '页面',
+    });
+    expect(engine.pageFingerprints.has('page-1')).toBe(false);
     db.close();
   });
 });

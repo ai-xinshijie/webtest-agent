@@ -100,15 +100,43 @@ describe('CoverageGuarantee', () => {
     expect(tracker.isExhausted()).toBe(true);
     expect(snapshot.actions).toMatchObject({ visited: 2, blocked: 1, pending: 0, resolvedPercentage: 100 });
     expect(snapshot.actions.percentage).toBeCloseTo(200 / 3);
-    expect(snapshot.combinations).toEqual({ covered: 1, blocked: 0, total: 2, percentage: 50, resolvedPercentage: 50 });
-    expect(snapshot.paths).toEqual({ covered: 1, blocked: 1, total: 2, percentage: 50, resolvedPercentage: 100 });
+    expect(snapshot.combinations).toEqual({ covered: 1, reused: 0, blocked: 0, total: 2, percentage: 50, resolvedPercentage: 50 });
+    expect(snapshot.paths).toEqual({ covered: 1, reused: 0, blocked: 1, total: 2, percentage: 50, resolvedPercentage: 100 });
   });
 
-  it('空覆盖快照按 100% 处理', () => {
+  it('空覆盖快照按未生成覆盖目标处理', () => {
     const snapshot = new CoverageTracker().snapshot();
-    expect(snapshot.actions.percentage).toBe(100);
-    expect(snapshot.combinations.percentage).toBe(100);
-    expect(snapshot.paths.percentage).toBe(100);
+    expect(snapshot.actions.percentage).toBe(0);
+    expect(snapshot.combinations.percentage).toBe(0);
+    expect(snapshot.paths.percentage).toBe(0);
+  });
+
+  it('独立记录记忆复用，不将其计入本会话实际覆盖', () => {
+    const tracker = new CoverageTracker();
+    tracker.initializeActions([{ pageId: 'p', componentId: 'c', action: 'click' }]);
+    tracker.markReused('p', 'c', 'click');
+    tracker.setExpectedCombinations(1);
+    tracker.markCombinationReused(['click']);
+    tracker.setExpectedPaths(1);
+    tracker.markPathReused(['p', 'next']);
+
+    expect(tracker.snapshot()).toMatchObject({
+      actions: { visited: 0, reused: 1, percentage: 0, resolvedPercentage: 100 },
+      combinations: { covered: 0, reused: 1, percentage: 0, resolvedPercentage: 100 },
+      paths: { covered: 0, reused: 1, percentage: 0, resolvedPercentage: 100 },
+    });
+
+    tracker.markVisited('p', 'c', 'click');
+    tracker.markReused('p', 'c', 'click');
+    tracker.recordCombination(['click']);
+    tracker.markCombinationReused(['click']);
+    tracker.recordPath(['p', 'next']);
+    tracker.markPathReused(['p', 'next']);
+    expect(tracker.snapshot()).toMatchObject({
+      actions: { visited: 1, reused: 0 },
+      combinations: { covered: 1, reused: 0 },
+      paths: { covered: 1, reused: 0 },
+    });
   });
 
   it('处理退化强度、有限路径和重复覆盖记录', () => {

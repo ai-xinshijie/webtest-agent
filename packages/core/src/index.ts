@@ -18,8 +18,11 @@ export {
   PathCoverageGenerator,
 } from './coverage/CoverageGuarantee.js';
 export { ComponentRevealer } from './exploration/ComponentRevealer.js';
+export { ReachabilityResolver } from './exploration/ReachabilityResolver.js';
 export { AuthSessionManager } from './auth/AuthSessionManager.js';
 export { NetworkFaultInjector } from './testing/NetworkFaultInjector.js';
+export { StateGraph } from './testing/StateGraph.js';
+export { SemanticOracle } from './testing/SemanticOracle.js';
 export { PluginManager } from './plugin/PluginManager.js';
 export { MCPClient } from './plugin/MCPClient.js';
 
@@ -32,8 +35,11 @@ export type {
   CoveringArrayResult, CoverageSnapshot, FactorValue, PathGraph,
 } from './coverage/CoverageGuarantee.js';
 export type { RevealResult } from './exploration/ComponentRevealer.js';
+export type { ReachabilityResult } from './exploration/ReachabilityResolver.js';
 export type { LoginResult } from './auth/AuthSessionManager.js';
 export type { NetworkFault, NetworkFaultType } from './testing/NetworkFaultInjector.js';
+export type { StateNode, StateTransition } from './testing/StateGraph.js';
+export type { OracleVerdict } from './testing/SemanticOracle.js';
 export type { MCPTool } from './plugin/MCPClient.js';
 export type {
   CodeRepairContext, CodeSelfHealerOptions, CommandResult, HotPatchReport, HotPatchStatus, RepairProposal, SourcePatch,

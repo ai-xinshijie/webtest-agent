@@ -12,6 +12,13 @@ export interface TestedItem {
   testCount: number;
 }
 
+export interface PageFingerprint {
+  targetId: string;
+  pageId: string;
+  fingerprint: string;
+  updatedAt: number;
+}
+
 export type TestedItemInput = Omit<TestedItem, 'targetId' | 'lastTestedAt' | 'testCount'>;
 
 export interface MemoryRule {
@@ -117,6 +124,26 @@ export class MemoryManager {
       SELECT status FROM memory_tested_items WHERE target_id = ? AND item_key = ?
     `).get(targetId, itemKey) as { status: TestedItem['status'] } | undefined;
     return row?.status ?? null;
+  }
+
+  getPageFingerprint(targetId: string, pageId: string): PageFingerprint | null {
+    const row = this.db.prepare(`
+      SELECT target_id, page_id, fingerprint, updated_at
+      FROM memory_page_fingerprints WHERE target_id = ? AND page_id = ?
+    `).get(targetId, pageId) as {
+      target_id: string; page_id: string; fingerprint: string; updated_at: number;
+    } | undefined;
+    if (!row) return null;
+    return { targetId: row.target_id, pageId: row.page_id, fingerprint: row.fingerprint, updatedAt: row.updated_at };
+  }
+
+  savePageFingerprint(targetId: string, pageId: string, fingerprint: string): void {
+    this.db.prepare(`
+      INSERT INTO memory_page_fingerprints (target_id, page_id, fingerprint, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(target_id, page_id) DO UPDATE SET
+        fingerprint = excluded.fingerprint, updated_at = excluded.updated_at
+    `).run(targetId, pageId, fingerprint, Date.now());
   }
 
   markTested(targetId: string, item: TestedItemInput): void {
@@ -477,14 +504,17 @@ export class MemoryManager {
   clearTestedItems(targetId?: string): void {
     if (targetId) {
       this.db.prepare('DELETE FROM memory_tested_items WHERE target_id = ?').run(targetId);
+      this.db.prepare('DELETE FROM memory_page_fingerprints WHERE target_id = ?').run(targetId);
       return;
     }
     this.db.exec('DELETE FROM memory_tested_items');
+    this.db.exec('DELETE FROM memory_page_fingerprints');
   }
 
   clear(targetId?: string): void {
     if (targetId) {
       this.db.prepare('DELETE FROM memory_tested_items WHERE target_id = ?').run(targetId);
+      this.db.prepare('DELETE FROM memory_page_fingerprints WHERE target_id = ?').run(targetId);
       this.db.prepare('DELETE FROM memory_rules WHERE target_id = ?').run(targetId);
       this.db.prepare('DELETE FROM memory_patterns WHERE target_id = ?').run(targetId);
       this.db.prepare('DELETE FROM memory_session_summaries WHERE target_id = ?').run(targetId);
@@ -493,6 +523,7 @@ export class MemoryManager {
 
     this.db.exec(`
       DELETE FROM memory_tested_items;
+      DELETE FROM memory_page_fingerprints;
       DELETE FROM memory_rules;
       DELETE FROM memory_patterns;
       DELETE FROM memory_session_summaries;

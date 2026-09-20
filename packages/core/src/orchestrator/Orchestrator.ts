@@ -5,7 +5,7 @@ import type { Page } from 'playwright';
 import { BrowserManager } from '../browser/BrowserManager.js';
 import { StructuredPerceiver } from '../perception/StructuredPerceiver.js';
 import { DatabaseManager } from '../db/Database.js';
-import { classifyComponent, type ComponentModel, type Component } from '../cognition/ComponentModel.js';
+import { classifyComponent, classifyComponentScope, type ComponentModel, type Component } from '../cognition/ComponentModel.js';
 import { InteractionExecutor } from '../tester/InteractionExecutor.js';
 import { TestEngine, type TestEngineResult } from '../tester/TestEngine.js';
 import { BFSExplorer } from '../exploration/BFSExplorer.js';
@@ -465,6 +465,7 @@ export class Orchestrator {
     const coverage: CoverageSnapshot = results.reduce((acc, item) => ({
       actions: {
         visited: acc.actions.visited + item.coverage.actions.visited,
+        reused: acc.actions.reused + (item.coverage.actions.reused ?? 0),
         blocked: acc.actions.blocked + item.coverage.actions.blocked,
         pending: acc.actions.pending + item.coverage.actions.pending,
         percentage: 0,
@@ -472,6 +473,7 @@ export class Orchestrator {
       },
       combinations: {
         covered: acc.combinations.covered + item.coverage.combinations.covered,
+        reused: acc.combinations.reused + (item.coverage.combinations.reused ?? 0),
         blocked: acc.combinations.blocked + item.coverage.combinations.blocked,
         total: acc.combinations.total + item.coverage.combinations.total,
         percentage: 0,
@@ -479,37 +481,38 @@ export class Orchestrator {
       },
       paths: {
         covered: acc.paths.covered + item.coverage.paths.covered,
+        reused: acc.paths.reused + (item.coverage.paths.reused ?? 0),
         blocked: acc.paths.blocked + item.coverage.paths.blocked,
         total: acc.paths.total + item.coverage.paths.total,
         percentage: 0,
         resolvedPercentage: 0,
       },
     }), {
-      actions: { visited: 0, blocked: 0, pending: 0, percentage: 0, resolvedPercentage: 0 },
-      combinations: { covered: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
-      paths: { covered: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
+      actions: { visited: 0, reused: 0, blocked: 0, pending: 0, percentage: 0, resolvedPercentage: 0 },
+      combinations: { covered: 0, reused: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
+      paths: { covered: 0, reused: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
     });
 
-    const actionTotal = coverage.actions.visited + coverage.actions.blocked
+    const actionTotal = coverage.actions.visited + coverage.actions.reused + coverage.actions.blocked
       + coverage.actions.pending;
     coverage.actions.percentage = actionTotal === 0
-      ? 100
+      ? 0
       : (coverage.actions.visited / actionTotal) * 100;
     coverage.actions.resolvedPercentage = actionTotal === 0
-      ? 100
-      : ((coverage.actions.visited + coverage.actions.blocked) / actionTotal) * 100;
+      ? 0
+      : ((coverage.actions.visited + coverage.actions.reused + coverage.actions.blocked) / actionTotal) * 100;
     coverage.combinations.percentage = coverage.combinations.total === 0
-      ? 100
+      ? 0
       : (coverage.combinations.covered / coverage.combinations.total) * 100;
     coverage.combinations.resolvedPercentage = coverage.combinations.total === 0
-      ? 100
-      : ((coverage.combinations.covered + coverage.combinations.blocked) / coverage.combinations.total) * 100;
+      ? 0
+      : ((coverage.combinations.covered + coverage.combinations.reused + coverage.combinations.blocked) / coverage.combinations.total) * 100;
     coverage.paths.percentage = coverage.paths.total === 0
-      ? 100
+      ? 0
       : (coverage.paths.covered / coverage.paths.total) * 100;
     coverage.paths.resolvedPercentage = coverage.paths.total === 0
-      ? 100
-      : ((coverage.paths.covered + coverage.paths.blocked) / coverage.paths.total) * 100;
+      ? 0
+      : ((coverage.paths.covered + coverage.paths.reused + coverage.paths.blocked) / coverage.paths.total) * 100;
 
     return {
       executedActions: results.reduce((sum, item) => sum + item.executedActions, 0),
@@ -612,6 +615,7 @@ export class Orchestrator {
         },
         constraints: this.extractConstraints(extracted),
         children: [],
+        scope: classifyComponentScope(extracted, classified.type),
         meta: {
           confidence: classified.confidence,
           source: classified.source,
@@ -646,7 +650,7 @@ export class Orchestrator {
         component.type,
         component.selector,
         component.label,
-        JSON.stringify(component.state),
+        JSON.stringify({ ...component.state, scope: component.scope }),
         component.meta.confidence,
         component.meta.source,
         Date.now(),

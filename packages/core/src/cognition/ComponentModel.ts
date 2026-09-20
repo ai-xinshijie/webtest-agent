@@ -8,6 +8,11 @@ export type ComponentType =
   | 'link' | 'dropdown' | 'datepicker' | 'fileupload'
   | 'unknown';
 
+/**
+ * 组件在页面中的测试范围。业务组件计入主覆盖率，其余组件保留为探索证据。
+ */
+export type ComponentScope = 'business' | 'navigation' | 'shell' | 'third-party' | 'unknown';
+
 export type PageRole =
   | 'login' | 'dashboard' | 'list' | 'detail'
   | 'form' | 'settings' | 'report' | 'modal' | 'unknown';
@@ -38,6 +43,7 @@ export interface Component {
   constraints: Constraint[];
   parent?: string;
   children: string[];
+  scope?: ComponentScope;
   meta: {
     confidence: number;
     source: 'rule' | 'signature' | 'llm';
@@ -147,4 +153,20 @@ export function classifyComponent(extracted: ExtractedComponent): {
   }
 
   return { type: 'unknown', confidence: 0.3, source: 'rule' };
+}
+
+/**
+ * 用可解释的本地规则区分业务控件和页面外壳，避免菜单、页脚链接污染业务覆盖率。
+ */
+export function classifyComponentScope(
+  extracted: ExtractedComponent,
+  type: ComponentType = classifyComponent(extracted).type,
+): ComponentScope {
+  const classes = extracted.classes.join(' ').toLowerCase();
+  const label = `${extracted.text ?? ''} ${extracted.ariaLabel ?? ''}`.toLowerCase();
+  if (/cookie|captcha|recaptcha|intercom|zendesk|third[- ]party/.test(classes)) return 'third-party';
+  if (/header|footer|navbar|sidebar|topbar|breadcrumb/.test(classes)) return 'shell';
+  if (type === 'link' || /^(home|首页|文档|docs|github|关于|帮助|help)$/.test(label.trim())) return 'navigation';
+  if (type === 'unknown') return 'unknown';
+  return 'business';
 }

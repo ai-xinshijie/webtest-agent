@@ -7,6 +7,17 @@ export interface ReportOptions {
   format: 'md' | 'json';
 }
 
+interface StateGraphSummary {
+  stateCount: number;
+  transitionCount: number;
+  passedTransitionCount: number;
+  failedTransitionCount: number;
+}
+
+const EMPTY_STATE_GRAPH: StateGraphSummary = {
+  stateCount: 0, transitionCount: 0, passedTransitionCount: 0, failedTransitionCount: 0,
+};
+
 /**
  * 生成中文测试报告，Markdown 面向用户，JSON 面向机器读取。
  */
@@ -46,11 +57,12 @@ export class ReportGenerator {
     const logs = this.getLogs(sessionId);
     const progress = session.progress_json ? JSON.parse(session.progress_json) : null;
     const hotPatches = this.getHotPatches(sessionId);
+    const stateGraph = this.getStateGraphSummary(sessionId, session.target_id);
 
     if (this.options.format === 'json') {
-      return this.generateJSON(session, pages, components, bugs, testResults, logs, progress, hotPatches);
+      return this.generateJSON(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph);
     }
-    return this.generateMarkdown(session, pages, components, bugs, testResults, logs, progress, hotPatches);
+    return this.generateMarkdown(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph);
   }
 
   private getLogs(sessionId: string): any[] {
@@ -68,6 +80,20 @@ export class ReportGenerator {
     `).all(sessionId) as Array<{ report_json: string }>).map(row => JSON.parse(row.report_json));
   }
 
+  private getStateGraphSummary(sessionId: string, targetId: string): StateGraphSummary {
+    const states = this.db.prepare('SELECT COUNT(*) AS count FROM state_nodes WHERE target_id = ?')
+      .get(targetId) as { count: number };
+    const transitions = this.db.prepare(
+      "SELECT COUNT(*) AS count, SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) AS passed, SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed FROM state_transitions WHERE session_id = ?",
+    ).get(sessionId) as { count: number; passed: number | null; failed: number | null };
+    return {
+      stateCount: states.count,
+      transitionCount: transitions.count,
+      passedTransitionCount: transitions.passed ?? 0,
+      failedTransitionCount: transitions.failed ?? 0,
+    };
+  }
+
   private generateMarkdown(
     session: any,
     pages: any[],
@@ -77,6 +103,7 @@ export class ReportGenerator {
     logs: any[],
     progress: any,
     hotPatches: any[],
+    stateGraph: StateGraphSummary = EMPTY_STATE_GRAPH,
   ): string {
     const duration = session.ended_at ? ((session.ended_at - session.started_at) / 1000).toFixed(1) : 'N/A';
     const reportTime = new Date().toISOString();
@@ -117,7 +144,16 @@ export class ReportGenerator {
     for (const [type, count] of typeCounts) {
       md += `- ${this.translateComponentType(type)}：${count} 个\n`;
     }
+    const scopes = this.componentScopeCounts(components);
+    md += '\n### 组件范围\n\n';
+    md += '- 业务组件：' + scopes.business + ' 个\n';
+    md += '- 导航组件：' + scopes.navigation + ' 个\n';
+    md += '- 页面外壳：' + scopes.shell + ' 个\n';
+    md += '- 第三方组件：' + scopes.thirdParty + ' 个\n';
+    md += '- 未分类组件：' + scopes.unknown + ' 个\n';
     md += `\n### 深度覆盖\n\n${this.coverageMarkdown(progress)}`;
+    md += '\n### 状态图\n\n| 状态节点 | 状态迁移 | 通过迁移 | 失败迁移 |\n|----------|----------|----------|----------|\n';
+    md += '| ' + stateGraph.stateCount + ' | ' + stateGraph.transitionCount + ' | ' + stateGraph.passedTransitionCount + ' | ' + stateGraph.failedTransitionCount + ' |\n';
 
     if (bugs.length > 0) {
       md += `\n## 问题列表（${bugs.length} 个）\n\n`;
@@ -186,6 +222,7 @@ export class ReportGenerator {
     logs: any[],
     progress: any,
     hotPatches: any[],
+    stateGraph: StateGraphSummary = EMPTY_STATE_GRAPH,
   ): string {
     return JSON.stringify({
       会话: {
@@ -204,8 +241,15 @@ export class ReportGenerator {
           acc[c.type] = (acc[c.type] || 0) + 1;
           return acc;
         }, {}),
+        组件范围: this.componentScopeCounts(components),
       },
       深度覆盖: progress?.coverage ?? null,
+      状态图: {
+        状态节点数: stateGraph.stateCount,
+        状态迁移数: stateGraph.transitionCount,
+        通过迁移数: stateGraph.passedTransitionCount,
+        失败迁移数: stateGraph.failedTransitionCount,
+      },
       问题列表: bugs.map(b => ({
         标识: b.id,
         严重级别: this.translateSeverity(b.severity),
@@ -307,19 +351,40 @@ export class ReportGenerator {
     if (!coverage) return '本次会话尚未生成深度覆盖快照。\n';
 
     const actions = coverage.actions;
-    const actionTotal = actions.visited + actions.blocked + actions.pending;
+    const actionReused = actions.reused ?? 0;
+    const actionTotal = actions.visited + actionReused + actions.blocked + actions.pending;
     const actionResolved = actions.resolvedPercentage ?? (actionTotal === 0
-      ? 100
-      : ((actions.visited + actions.blocked) / actionTotal) * 100);
-    let markdown = '| 维度 | 已执行 | 受阻 | 待覆盖 | 总数 | 实际覆盖率 | 已解析率 |\n|------|--------|------|--------|------|------------|----------|\n';
-    markdown += `| 动作 | ${actions.visited} | ${actions.blocked} | ${actions.pending} | ${actionTotal} | ${Number(actions.percentage ?? 0).toFixed(2)}% | ${Number(actionResolved).toFixed(2)}% |\n`;
+      ? 0
+      : ((actions.visited + actionReused + actions.blocked) / actionTotal) * 100);
+    let markdown = '| 维度 | 已执行 | 复用 | 受阻 | 待覆盖 | 总数 | 实际覆盖率 | 已解析率 |\n|------|--------|------|------|--------|------|------------|----------|\n';
+    markdown += `| 动作 | ${actions.visited} | ${actionReused} | ${actions.blocked} | ${actions.pending} | ${actionTotal} | ${Number(actions.percentage ?? 0).toFixed(2)}% | ${Number(actionResolved).toFixed(2)}% |\n`;
 
     for (const [name, item] of [['组合', coverage.combinations], ['路径', coverage.paths]] as const) {
       const blocked = item.blocked ?? 0;
-      const resolved = item.resolvedPercentage ?? (item.total === 0 ? 100 : ((item.covered + blocked) / item.total) * 100);
-      markdown += `| ${name} | ${item.covered} | ${blocked} | ${Math.max(0, item.total - item.covered - blocked)} | ${item.total} | ${Number(item.percentage ?? 0).toFixed(2)}% | ${Number(resolved).toFixed(2)}% |\n`;
+      const reused = item.reused ?? 0;
+      const resolved = item.resolvedPercentage ?? (item.total === 0 ? 0 : ((item.covered + reused + blocked) / item.total) * 100);
+      markdown += `| ${name} | ${item.covered} | ${reused} | ${blocked} | ${Math.max(0, item.total - item.covered - reused - blocked)} | ${item.total} | ${Number(item.percentage ?? 0).toFixed(2)}% | ${Number(resolved).toFixed(2)}% |\n`;
     }
-    return `${markdown}\n实际覆盖率只计入真正执行的项目；已解析率包含已确认受阻项目。受阻项保留在报告中，便于后续解除条件后重测。\n`;
+    return `${markdown}\n实际覆盖率只计入本会话真正执行的项目；复用项必须页面指纹未变更。已解析率包含复用和已确认受阻项目；空集合显示为 0%，不等同于已覆盖。\n`;
+  }
+
+  private componentScopeCounts(components: any[]): {
+    business: number; navigation: number; shell: number; thirdParty: number; unknown: number;
+  } {
+    const counts = { business: 0, navigation: 0, shell: 0, thirdParty: 0, unknown: 0 };
+    for (const component of components) {
+      let parsed: { scope?: string } | undefined;
+      try {
+        parsed = JSON.parse(component.state_json ?? '{}') as { scope?: string };
+      } catch { /* 无法解析历史状态时按未知范围处理。 */ }
+      const scope = parsed?.scope ?? 'unknown';
+      if (scope === 'business') counts.business++;
+      else if (scope === 'navigation') counts.navigation++;
+      else if (scope === 'shell') counts.shell++;
+      else if (scope === 'third-party') counts.thirdParty++;
+      else counts.unknown++;
+    }
+    return counts;
   }
 
   private translateHotPatchStatus(status: string): string {

@@ -70,6 +70,31 @@ CREATE TABLE IF NOT EXISTS navigation_edges (
   method TEXT
 );
 
+CREATE TABLE IF NOT EXISTS state_nodes (
+  id TEXT PRIMARY KEY,
+  target_id TEXT NOT NULL,
+  page_id TEXT NOT NULL REFERENCES pages(id),
+  fingerprint TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  visit_count INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(target_id, page_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS state_transitions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  target_id TEXT NOT NULL,
+  from_state_id TEXT NOT NULL REFERENCES state_nodes(id),
+  to_state_id TEXT NOT NULL REFERENCES state_nodes(id),
+  component_id TEXT,
+  action_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS test_results (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -151,6 +176,14 @@ CREATE TABLE IF NOT EXISTS memory_tested_items (
   PRIMARY KEY (target_id, item_key)
 );
 
+CREATE TABLE IF NOT EXISTS memory_page_fingerprints (
+  target_id TEXT NOT NULL,
+  page_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (target_id, page_id)
+);
+
 CREATE TABLE IF NOT EXISTS memory_rules (
   id TEXT PRIMARY KEY,
   target_id TEXT,
@@ -213,6 +246,8 @@ DELETE FROM components WHERE id NOT IN (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_components_unique ON components(target_id, page_id, selector);
 CREATE INDEX IF NOT EXISTS idx_components_target ON components(target_id);
+CREATE INDEX IF NOT EXISTS idx_state_nodes_target_page ON state_nodes(target_id, page_id);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_session ON state_transitions(session_id);
 CREATE INDEX IF NOT EXISTS idx_test_results_session ON test_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_session ON bugs(session_id);
 CREATE INDEX IF NOT EXISTS idx_bugs_target ON bugs(target_id);
@@ -221,6 +256,7 @@ DELETE FROM navigation_edges WHERE id NOT IN (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_navigation_edges_unique ON navigation_edges(target_id, from_page_id, to_page_id, method);
 CREATE INDEX IF NOT EXISTS idx_memory_tested ON memory_tested_items(target_id);
+CREATE INDEX IF NOT EXISTS idx_memory_page_fingerprints_target ON memory_page_fingerprints(target_id);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
 CREATE INDEX IF NOT EXISTS idx_hot_patch_reports_session ON hot_patch_reports(session_id, created_at);

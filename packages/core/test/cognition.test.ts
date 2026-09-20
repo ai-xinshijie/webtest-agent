@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyComponent } from '../src/cognition/ComponentModel.js';
+import { classifyComponent, classifyComponentScope } from '../src/cognition/ComponentModel.js';
 import { QR001, QR002, QR006 } from '../src/cognition/QualityRule.js';
 import type { ExtractedComponent, StructuredObservation } from '../src/perception/types.js';
 
@@ -92,6 +92,16 @@ describe('classifyComponent', () => {
     expect(classifyComponent(createComponent({ clickability: { score: 0, isInteractive: false, isHighConfidence: false, signals: {
       isSemanticTag: false, hasAriaRole: false, cursorPointer: false, hasOnclick: false, hasTabIndex: false,
     } } })).type).toBe('unknown');
+  });
+});
+
+describe('classifyComponentScope', () => {
+  it('将业务控件、导航、外壳和第三方组件分离', () => {
+    expect(classifyComponentScope(createComponent({ tag: 'button' }))).toBe('business');
+    expect(classifyComponentScope(createComponent({ tag: 'a', text: '帮助' }))).toBe('navigation');
+    expect(classifyComponentScope(createComponent({ tag: 'button', classes: ['app-sidebar'] }))).toBe('shell');
+    expect(classifyComponentScope(createComponent({ tag: 'button', classes: ['intercom-launcher'] }))).toBe('third-party');
+    expect(classifyComponentScope(createComponent(), 'unknown')).toBe('unknown');
   });
 });
 

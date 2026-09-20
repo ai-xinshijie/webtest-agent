@@ -7,6 +7,7 @@ import type { TargetConfig } from '../config/types.js';
 import type { ExtractedComponent } from '../perception/types.js';
 import { StructuredPerceiver } from '../perception/StructuredPerceiver.js';
 import { ComponentRevealer } from '../exploration/ComponentRevealer.js';
+import { ReachabilityResolver } from '../exploration/ReachabilityResolver.js';
 import { InteractionExecutor } from './InteractionExecutor.js';
 import {
   CoveringArrayGenerator,
@@ -15,7 +16,10 @@ import {
   type CoverageSnapshot,
 } from '../coverage/CoverageGuarantee.js';
 import { NetworkFaultInjector } from '../testing/NetworkFaultInjector.js';
+import { StateGraph } from '../testing/StateGraph.js';
+import { SemanticOracle } from '../testing/SemanticOracle.js';
 import { BUILTIN_RULES, type RuleContext } from '../cognition/QualityRule.js';
+import type { StructuredObservation } from '../perception/types.js';
 
 interface PageRow {
   id: string;
@@ -72,13 +76,22 @@ const ACTIONS_BY_TYPE: Record<string, string[]> = {
   table: ['row-click', 'sort'],
 };
 
+const FEEDBACK_ACTIONS = new Set([
+  'click', 'double-click', 'right-click', 'submit-empty', 'submit-partial', 'submit-valid',
+  'open', 'close-esc', 'close-overlay', 'expand', 'collapse', 'switch', 'check', 'uncheck',
+  'select', 'next', 'prev', 'select-first', 'select-last', 'row-click', 'sort',
+]);
+
 /**
  * 深度测试引擎：动作覆盖、组合覆盖、路径覆盖和混沌测试统一调度。
  */
 export class TestEngine {
   private perceiver = new StructuredPerceiver();
   private revealer: ComponentRevealer;
+  private reachability: ReachabilityResolver;
   private injector = new NetworkFaultInjector();
+  private stateGraph: StateGraph;
+  private oracle = new SemanticOracle();
   private covering = new CoveringArrayGenerator();
   private pathGenerator = new PathCoverageGenerator();
   private tracker = new CoverageTracker();
@@ -89,6 +102,7 @@ export class TestEngine {
   private skippedCombinations = 0;
   private skippedPaths = 0;
   private chaosTests = 0;
+  private pageFingerprints = new Map<string, string>();
 
   constructor(
     private db: DatabaseManager,
@@ -98,11 +112,13 @@ export class TestEngine {
     private options: TestEngineOptions,
   ) {
     this.revealer = new ComponentRevealer(logger);
+    this.reachability = new ReachabilityResolver(logger);
     this.injector.setLogger(logger);
+    this.stateGraph = new StateGraph(db);
   }
 
   async run(page: Page, pages: PageRow[]): Promise<TestEngineResult> {
-    const allComponents = pages.flatMap(item => this.getComponents(item.id));
+    const allComponents = pages.flatMap(item => this.getTestableComponents(item.id));
     const plannedActions = [];
     for (const component of allComponents) {
       for (const action of this.getActions(component.type)) {
@@ -146,44 +162,47 @@ export class TestEngine {
   }
 
   private async testPageActions(page: Page, pageRow: PageRow): Promise<void> {
-    const components = this.getComponents(pageRow.id);
+    const components = this.getTestableComponents(pageRow.id);
     try {
       await this.navigate(page, pageRow);
     } catch (error) {
       this.recordNavigationBlocked(pageRow, components, error);
       return;
     }
+    const fingerprint = await this.capturePageFingerprint(page, pageRow);
 
     for (const row of components) {
       const component = this.toExtracted(row);
       for (const action of this.getActions(row.type)) {
         this.assertWithinDeadline();
         const itemKey = `${this.options.targetId}:${row.id}:${action}`;
-        const unavailableReason = this.getUnavailableReason(component);
-        if (unavailableReason) {
+        const availability = await this.reachability.resolve(page, component, action, {
+          pageUrl: pageRow.url_pattern, phase: 'test', componentId: row.id,
+        });
+        if (!availability.reachable) {
           this.skippedActions++;
           this.persistResult({
             componentId: row.id,
             testType: action,
             status: 'skipped',
             input: { action, selector: row.selector },
-            output: { reason: unavailableReason },
+            output: { reason: availability.reason, status: availability.status, attempts: availability.attempts },
             startedAt: Date.now(),
           });
           this.tracker.markBlocked(row.page_id, row.id, action);
           continue;
         }
-        if (this.shouldSkip(itemKey)) {
+        if (this.shouldReuse(itemKey, row.page_id, fingerprint)) {
           this.skippedActions++;
           this.persistResult({
             componentId: row.id,
             testType: action,
             status: 'skipped',
             input: { action, selector: row.selector },
-            output: { reason: '记忆中已有测试结果，本次跳过执行' },
+            output: { reason: '页面未变更，复用历史通过测试结果', fingerprint },
             startedAt: Date.now(),
           });
-          this.tracker.markVisited(row.page_id, row.id, action);
+          this.tracker.markReused(row.page_id, row.id, action);
           continue;
         }
 
@@ -196,13 +215,23 @@ export class TestEngine {
           const after = await this.perceiver.capture(page);
           const changed = JSON.stringify(before.components.length) !== JSON.stringify(after.components.length)
             || page.url() !== pageRow.url_pattern;
+          const fromState = this.stateGraph.observe(this.options.targetId, pageRow.id, before);
+          const toState = this.stateGraph.observe(this.options.targetId, pageRow.id, after);
+          const oracle = this.oracle.evaluate({ action, before, after });
+          this.stateGraph.recordTransition({
+            sessionId: this.options.sessionId, targetId: this.options.targetId, from: fromState, to: toState,
+            componentId: row.id, action, status: 'passed', evidence: { changed, oracle },
+          });
 
           this.persistResult({
             componentId: row.id,
             testType: action,
             status: 'passed',
             input: { action, selector: row.selector },
-            output: { changed, url: page.url(), componentCount: after.components.length },
+            output: {
+              changed, url: page.url(), componentCount: after.components.length,
+              stateTransition: { from: fromState.id, to: toState.id }, oracle,
+            },
             startedAt,
           });
           this.memory.markTested(this.options.targetId, {
@@ -220,6 +249,7 @@ export class TestEngine {
             selector: row.selector,
             pageUrl: pageRow.url_pattern,
           });
+          this.persistOracleViolations(oracle, pageRow.url_pattern, row.id);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.persistResult({
@@ -261,11 +291,11 @@ export class TestEngine {
     this.db.prepare(`
       UPDATE pages SET test_status = 'tested', last_visited_at = ? WHERE id = ?
     `).run(Date.now(), pageRow.id);
+    this.memory.savePageFingerprint(this.options.targetId, pageRow.id, fingerprint);
   }
 
   private async testPageCombinations(page: Page, pageRow: PageRow): Promise<void> {
-    const components = this.getComponents(pageRow.id)
-      .filter(row => !this.getUnavailableReason(this.toExtracted(row)))
+    const components = this.getTestableComponents(pageRow.id)
       .filter(row => this.getActions(row.type).length > 1)
       .slice(0, 10);
 
@@ -286,24 +316,25 @@ export class TestEngine {
         rowValues.join('|'),
         `strength:${strength}`,
       ].join(':');
-      if (this.shouldSkip(itemKey)) {
-        this.tracker.recordCombination(rowValues);
-        this.persistResult({
-          componentId: components[0]!.id,
-          testType: `combination-${strength}way`,
-          status: 'skipped',
-          input: { combination: rowValues },
-          output: { reason: '记忆中已有组合测试结果，本次跳过执行' },
-          startedAt: Date.now(),
-        });
-        this.skippedCombinations++;
-        continue;
-      }
       try {
         await this.navigate(page, pageRow);
       } catch (error) {
         this.recordCombinationNavigationBlocked(pageRow, components, result.rows.slice(result.rows.indexOf(rowValues)), strength, error);
         return;
+      }
+      const fingerprint = await this.capturePageFingerprint(page, pageRow);
+      if (this.shouldReuse(itemKey, pageRow.id, fingerprint)) {
+        this.tracker.markCombinationReused(rowValues);
+        this.persistResult({
+          componentId: components[0]!.id,
+          testType: `combination-${strength}way`,
+          status: 'skipped',
+          input: { combination: rowValues },
+          output: { reason: '页面未变更，复用历史组合测试结果', fingerprint },
+          startedAt: Date.now(),
+        });
+        this.skippedCombinations++;
+        continue;
       }
       const startedAt = Date.now();
       const input: Record<string, unknown> = {};
@@ -339,6 +370,8 @@ export class TestEngine {
       });
       this.executedCombinations++;
     }
+    const fingerprint = this.pageFingerprints.get(pageRow.id);
+    if (fingerprint) this.memory.savePageFingerprint(this.options.targetId, pageRow.id, fingerprint);
   }
 
   private async testPaths(page: Page): Promise<void> {
@@ -358,19 +391,6 @@ export class TestEngine {
       this.assertWithinDeadline();
       const itemKey = `path:${path.join('>')}`;
       const startedAt = Date.now();
-      if (this.shouldSkip(itemKey)) {
-        this.tracker.recordPath(path);
-        this.persistResult({
-          componentId: null,
-          testType: 'path-coverage',
-          status: 'skipped',
-          input: { path },
-          output: { reason: '记忆中已有路径测试结果，本次跳过执行' },
-          startedAt,
-        });
-        this.skippedPaths++;
-        continue;
-      }
       let failed = false;
       try {
         for (const pageId of path) {
@@ -476,6 +496,13 @@ export class TestEngine {
     `).all(pageId) as unknown as ComponentRow[];
   }
 
+  private getTestableComponents(pageId: string): ComponentRow[] {
+    return this.getComponents(pageId).filter(row => {
+      const state = row.state_json ? JSON.parse(row.state_json) as { scope?: string } : {};
+      return state.scope === undefined || state.scope === 'business' || state.scope === 'unknown';
+    });
+  }
+
   private assertWithinDeadline(): void {
     if (this.options.deadlineAt !== undefined && Date.now() >= this.options.deadlineAt) {
       throw new Error('测试会话已达到最大运行时长，未执行项目保留为待覆盖');
@@ -500,6 +527,7 @@ export class TestEngine {
     };
 
     for (const rule of BUILTIN_RULES) {
+      if (rule.id === 'QR001' && !FEEDBACK_ACTIONS.has(input.action)) continue;
       if (rule.id === 'QR002' && !input.action.startsWith('submit')) continue;
       const result = await this.logger.runScript(
         { description: `执行动作质量规则：${rule.name}`, module: 'TestEngine', method: 'evaluateActionEvidence' },
@@ -524,6 +552,24 @@ export class TestEngine {
         null,
         JSON.stringify(result.violation.evidence),
         Date.now(),
+      );
+    }
+  }
+
+  private persistOracleViolations(
+    verdicts: Array<{ name: string; passed: boolean; detail: string }>,
+    pageUrl: string,
+    componentId: string,
+  ): void {
+    for (const verdict of verdicts.filter(item => !item.passed)) {
+      this.db.prepare(`
+        INSERT INTO bugs
+          (id, session_id, target_id, severity, title, description, page_url, rule_id, component_id, evidence_json, detected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(), this.options.sessionId, this.options.targetId, 'major',
+        `语义断言失败：${verdict.name}`, verdict.detail, pageUrl, `ORACLE:${verdict.name}`, componentId,
+        JSON.stringify(verdict), Date.now(),
       );
     }
   }
@@ -592,13 +638,30 @@ export class TestEngine {
     );
   }
 
-  private shouldSkip(itemKey: string): boolean {
+  private shouldReuse(itemKey: string, pageId: string, fingerprint: string): boolean {
     if (this.options.runMode === 'retest' || this.options.runMode === 'fresh') return false;
 
     const status = this.memory.getTestedStatus(this.options.targetId, itemKey);
     if (this.options.runMode === 'regression') return status !== null && status !== 'failed';
-    if (this.options.runMode === 'continue') return status !== null;
-    return status === 'passed' || status === 'skipped';
+    if (status !== 'passed') return false;
+    const known = this.memory.getPageFingerprint(this.options.targetId, pageId);
+    return known?.fingerprint === fingerprint;
+  }
+
+  private async capturePageFingerprint(page: Page, pageRow: PageRow): Promise<string> {
+    const cached = this.pageFingerprints.get(pageRow.id);
+    if (cached) return cached;
+    const observation = await this.perceiver.capture(page);
+    const fingerprint = this.fingerprint(observation);
+    this.pageFingerprints.set(pageRow.id, fingerprint);
+    return fingerprint;
+  }
+
+  private fingerprint(observation: StructuredObservation): string {
+    const components = observation.components
+      .map(component => `${component.selector ?? component.tag}:${component.role ?? ''}:${component.text ?? ''}`)
+      .sort();
+    return JSON.stringify({ url: observation.url, title: observation.title, components });
   }
 
   private getUnavailableReason(component: ExtractedComponent): string | null {

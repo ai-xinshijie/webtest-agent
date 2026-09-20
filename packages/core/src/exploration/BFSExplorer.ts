@@ -1,6 +1,6 @@
 import type { Page } from 'playwright';
 import type { StructuredObservation } from '../perception/types.js';
-import { classifyComponent } from '../cognition/ComponentModel.js';
+import { classifyComponent, classifyComponentScope } from '../cognition/ComponentModel.js';
 import type { DatabaseManager } from '../db/Database.js';
 import { randomUUID } from 'node:crypto';
 import type { AgentLogger } from '../logger/AgentLogger.js';
@@ -205,6 +205,7 @@ export class BFSExplorer {
 
     for (const extracted of observation.components) {
       const classified = classifyComponent(extracted);
+      const scope = classifyComponentScope(extracted, classified.type);
       const selector = extracted.selector ?? extracted.tag;
       const label = extracted.text ?? extracted.ariaLabel ?? 'unknown';
 
@@ -226,7 +227,7 @@ export class BFSExplorer {
         classified.type,
         selector,
         label,
-        JSON.stringify(extracted.state),
+        JSON.stringify({ ...extracted.state, scope }),
         classified.confidence,
         classified.source,
         Date.now(),

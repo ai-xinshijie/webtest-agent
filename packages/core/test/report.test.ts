@@ -31,6 +31,14 @@ function setup(): { database: DatabaseManager; sessionId: string } {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run('component-1', 'target-1', 'page-1', 'button', '#submit', '提交按钮', '{}', '[]', 0.95, 'rule', 1000, 2000);
   db.prepare(`
+    INSERT INTO state_nodes (id, target_id, page_id, fingerprint, summary_json, first_seen_at, last_seen_at)
+    VALUES ('state-1', 'target-1', 'page-1', 'fingerprint', '{}', 1, 1)
+  `).run();
+  db.prepare(`
+    INSERT INTO state_transitions (id, session_id, target_id, from_state_id, to_state_id, action_type, status, evidence_json, created_at)
+    VALUES ('transition-1', 'session-1', 'target-1', 'state-1', 'state-1', 'click', 'passed', '{}', 1)
+  `).run();
+  db.prepare(`
     INSERT INTO bugs (id, session_id, target_id, severity, title, description, page_url, rule_id, detected_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run('bug-1', 'session-1', 'target-1', 'major', '提交后无反馈', '点击提交后页面无变化', 'https://example.com/page', 'QR001', 2500);
@@ -92,8 +100,11 @@ describe('ReportGenerator', () => {
     expect(report).toContain('执行表单测试');
     expect(report).toContain('按钮：1 个');
     expect(report).toContain('### 深度覆盖');
-    expect(report).toContain('| 动作 | 3 | 1 | 0 | 4 | 75.00% |');
-    expect(report).toContain('实际覆盖率只计入真正执行的项目');
+    expect(report).toContain('### 组件范围');
+    expect(report).toContain('### 状态图');
+    expect(report).toContain('| 1 | 1 | 1 | 0 |');
+    expect(report).toContain('| 动作 | 3 | 0 | 1 | 0 | 4 | 75.00% |');
+    expect(report).toContain('实际覆盖率只计入本会话真正执行的项目');
     expect(report).toContain('## 代码自愈');
     expect(report).toContain('登录异常');
   });
@@ -110,6 +121,8 @@ describe('ReportGenerator', () => {
     expect(parsed.执行时间线[0].操作.type).toBe('form-test');
     expect(parsed.执行时间线[1].结果.duration).toBe(2000);
     expect(parsed.深度覆盖.actions.blocked).toBe(1);
+    expect(parsed.覆盖.组件范围).toEqual({ business: 0, navigation: 0, shell: 0, thirdParty: 0, unknown: 1 });
+    expect(parsed.状态图).toEqual({ 状态节点数: 1, 状态迁移数: 1, 通过迁移数: 1, 失败迁移数: 0 });
     expect(parsed.代码自愈[0].rootCause).toBe('登录异常');
     expect(parsed.执行异常).toEqual([]);
     expect(parsed.测试结果[0].输出).toEqual({});
@@ -181,6 +194,8 @@ describe('ReportGenerator', () => {
   it('空数据、未知值与覆盖快照边界仍可生成报告', () => {
     const { database, sessionId } = setup();
     database.prepare('DELETE FROM components').run();
+    database.prepare('DELETE FROM state_transitions').run();
+    database.prepare('DELETE FROM state_nodes').run();
     database.prepare('DELETE FROM pages').run();
     database.prepare('DELETE FROM bugs').run();
     database.prepare('DELETE FROM test_results').run();
@@ -199,7 +214,7 @@ describe('ReportGenerator', () => {
       actions: { visited: 0, blocked: 0, pending: 1, percentage: 0 },
       combinations: { covered: 3, total: 1, percentage: 300 },
       paths: { covered: 0, total: 0, percentage: 0 },
-    } })).toContain('| 组合 | 3 | 0 | 0 | 1 | 300.00% |');
+    } })).toContain('| 组合 | 3 | 0 | 0 | 0 | 1 | 300.00% |');
   });
 
   it('保存报告支持指定文件名', () => {
@@ -254,7 +269,22 @@ describe('ReportGenerator', () => {
       combinations: { covered: 0, total: 0 },
       paths: { covered: 0, total: 0 },
     } });
-    expect(markdown).toContain('| 动作 | 0 | 0 | 0 | 0 | 0.00% |');
-    expect(markdown).toContain('| 路径 | 0 | 0 | 0 | 0 | 0.00% |');
+    expect(markdown).toContain('| 动作 | 0 | 0 | 0 | 0 | 0 | 0.00% |');
+    expect(markdown).toContain('| 路径 | 0 | 0 | 0 | 0 | 0 | 0.00% |');
+  });
+
+  it('组件范围统计兼容全部范围和损坏的历史状态', () => {
+    const { database } = setup();
+    const generator = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;
+
+    expect(generator.componentScopeCounts([
+      { state_json: JSON.stringify({ scope: 'business' }) },
+      { state_json: JSON.stringify({ scope: 'navigation' }) },
+      { state_json: JSON.stringify({ scope: 'shell' }) },
+      { state_json: JSON.stringify({ scope: 'third-party' }) },
+      { state_json: JSON.stringify({ scope: 'future-scope' }) },
+      { state_json: null },
+      { state_json: '{损坏的历史状态' },
+    ])).toEqual({ business: 1, navigation: 1, shell: 1, thirdParty: 1, unknown: 3 });
   });
 });

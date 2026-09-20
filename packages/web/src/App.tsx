@@ -38,9 +38,9 @@ interface SessionSummary {
     executedPaths: number;
     chaosTests: number;
     coverage: {
-      actions: { visited: number; blocked: number; pending: number; percentage: number };
-      combinations: { covered: number; total: number; percentage: number };
-      paths: { covered: number; total: number; percentage: number };
+      actions: { visited: number; reused?: number; blocked: number; pending: number; percentage: number };
+      combinations: { covered: number; reused?: number; total: number; percentage: number };
+      paths: { covered: number; reused?: number; total: number; percentage: number };
     };
   } | null;
 }
@@ -423,15 +423,15 @@ export default function App() {
               </div>
               <div className="metric-grid">
                 <div className="metric">
-                  <span>动作覆盖</span>
+                  <span>动作实际覆盖</span>
                   <strong>{selected?.progress?.coverage.actions.percentage.toFixed(1) ?? '0.0'}%</strong>
                 </div>
                 <div className="metric">
-                  <span>组合覆盖</span>
+                  <span>组合实际覆盖</span>
                   <strong>{selected?.progress?.coverage.combinations.percentage.toFixed(1) ?? '0.0'}%</strong>
                 </div>
                 <div className="metric">
-                  <span>路径覆盖</span>
+                  <span>路径实际覆盖</span>
                   <strong>{selected?.progress?.coverage.paths.percentage.toFixed(1) ?? '0.0'}%</strong>
                 </div>
                 <div className="metric">

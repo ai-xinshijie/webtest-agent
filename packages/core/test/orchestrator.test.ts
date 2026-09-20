@@ -500,9 +500,9 @@ describe('Orchestrator', () => {
   it('合并结果并处理零覆盖分支', async () => {
     const orchestrator = new Orchestrator(createConfig()) as any;
     const empty = orchestrator.mergeResults([]);
-    expect(empty.coverage.actions.percentage).toBe(100);
-    expect(empty.coverage.combinations.percentage).toBe(100);
-    expect(empty.coverage.paths.percentage).toBe(100);
+    expect(empty.coverage.actions.percentage).toBe(0);
+    expect(empty.coverage.combinations.percentage).toBe(0);
+    expect(empty.coverage.paths.percentage).toBe(0);
 
     const merged = orchestrator.mergeResults([mocks.testResult, {
       ...mocks.testResult,
