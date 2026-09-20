@@ -23,6 +23,7 @@ describe('CLI 程序装配', () => {
       'status',
       'stop',
       'auth',
+      'case',
     ]);
     expect(program.name()).toBe('wta');
     expect(program.description()).toBe('自主 Web 界面深度测试代理');

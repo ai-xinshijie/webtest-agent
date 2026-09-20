@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
@@ -11,6 +11,7 @@ import {
   MemoryManager,
   Orchestrator,
   PluginManager,
+  TestCaseManager,
   type AgentConfig,
   type TargetConfig,
 } from '@wta/core';
@@ -35,6 +36,10 @@ interface RunRequestBody {
   headless?: boolean;
   resume?: boolean;
   maxDuration?: number;
+}
+
+interface RunTestCaseRequestBody {
+  headless?: boolean;
 }
 
 /**
@@ -152,6 +157,33 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
     return new AgentLogger(db, sessionId).getTimeline();
   });
 
+  fastify.get('/api/test-cases', async request => {
+    const { target } = request.query as { target?: string };
+    return new TestCaseManager(db).list(target);
+  });
+
+  fastify.post('/api/test-cases/:caseId/run', async (request, reply) => {
+    const { caseId } = request.params as { caseId: string };
+    const body = (request.body ?? {}) as RunTestCaseRequestBody;
+    const testCase = new TestCaseManager(db).list().find(item => item.id === caseId);
+    if (!testCase) throw new Error(`未找到测试用例：${caseId}`);
+    const target = configManager.loadTarget(testCase.targetId);
+    const sessionId = randomUUID();
+    const runner = ensureOrchestrator();
+    void runner.run(target, {
+      sessionId,
+      runMode: 'retest',
+      phase: 'test',
+      parallel: 1,
+      headless: body.headless,
+      caseIds: [caseId],
+    }).catch(error => {
+      console.error(`测试用例执行失败：${caseId}，${error instanceof Error ? error.message : error}`);
+    });
+    reply.code(202);
+    return { sessionId, status: 'running', testCaseId: caseId };
+  });
+
   fastify.post('/api/run', async (request, reply) => {
     const body = request.body as RunRequestBody;
     if (!body?.target) throw new Error('必须提供测试目标名称');
@@ -212,6 +244,20 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
         };
       })
       .reverse();
+  });
+
+  fastify.get('/api/reports/:name', async request => {
+    const { name } = request.params as { name: string };
+    if (path.basename(name) !== name || !/\.(md|json)$/.test(name)) {
+      throw new Error('报告文件名不合法');
+    }
+    const reportPath = path.join(rootDir, '.wta', 'reports', name);
+    if (!existsSync(reportPath)) throw new Error(`未找到报告文件：${name}`);
+    return {
+      name,
+      format: name.endsWith('.json') ? 'json' : 'md',
+      content: readFileSync(reportPath, 'utf-8'),
+    };
   });
 
   fastify.get('/api/memory', async () => {

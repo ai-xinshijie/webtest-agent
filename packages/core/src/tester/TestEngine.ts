@@ -18,6 +18,7 @@ import {
 import { NetworkFaultInjector } from '../testing/NetworkFaultInjector.js';
 import { StateGraph } from '../testing/StateGraph.js';
 import { SemanticOracle } from '../testing/SemanticOracle.js';
+import { TestCaseManager } from './TestCaseManager.js';
 import { BUILTIN_RULES, type RuleContext } from '../cognition/QualityRule.js';
 import type { StructuredObservation } from '../perception/types.js';
 
@@ -46,6 +47,7 @@ export interface TestEngineOptions {
   enablePaths?: boolean;
   enableChaos?: boolean;
   deadlineAt?: number;
+  caseIds?: string[];
 }
 
 export interface TestEngineResult {
@@ -103,6 +105,8 @@ export class TestEngine {
   private skippedPaths = 0;
   private chaosTests = 0;
   private pageFingerprints = new Map<string, string>();
+  private cases: TestCaseManager;
+  private selectedActionKeys = new Set<string>();
 
   constructor(
     private db: DatabaseManager,
@@ -115,13 +119,15 @@ export class TestEngine {
     this.reachability = new ReachabilityResolver(logger);
     this.injector.setLogger(logger);
     this.stateGraph = new StateGraph(db);
+    this.cases = new TestCaseManager(db);
+    this.selectedActionKeys = this.cases.getActionKeys(options.caseIds ?? []);
   }
 
   async run(page: Page, pages: PageRow[]): Promise<TestEngineResult> {
     const allComponents = pages.flatMap(item => this.getTestableComponents(item.id));
     const plannedActions = [];
     for (const component of allComponents) {
-      for (const action of this.getActions(component.type)) {
+      for (const action of this.actionsForComponent(component)) {
         plannedActions.push({ pageId: component.page_id, componentId: component.id, action });
       }
     }
@@ -173,7 +179,7 @@ export class TestEngine {
 
     for (const row of components) {
       const component = this.toExtracted(row);
-      for (const action of this.getActions(row.type)) {
+      for (const action of this.actionsForComponent(row)) {
         this.assertWithinDeadline();
         const itemKey = `${this.options.targetId}:${row.id}:${action}`;
         const availability = await this.reachability.resolve(page, component, action, {
@@ -578,6 +584,12 @@ export class TestEngine {
     return ACTIONS_BY_TYPE[type] ?? ['click'];
   }
 
+  private actionsForComponent(component: ComponentRow): string[] {
+    const actions = this.getActions(component.type);
+    if (!this.options.caseIds) return actions;
+    return actions.filter(action => this.selectedActionKeys.has(`${component.id}:${action}`));
+  }
+
   private recordNavigationBlocked(
     pageRow: PageRow,
     components: ComponentRow[],
@@ -585,7 +597,7 @@ export class TestEngine {
   ): void {
     const reason = `页面不可访问，已阻断组件动作：${error instanceof Error ? error.message : String(error)}`;
     for (const row of components) {
-      for (const action of this.getActions(row.type)) {
+      for (const action of this.actionsForComponent(row)) {
         if (!this.tracker.isPendingAction(row.page_id, row.id, action)) continue;
         this.tracker.markBlocked(row.page_id, row.id, action);
         this.persistResult({
@@ -740,6 +752,12 @@ export class TestEngine {
       JSON.stringify(input.output),
       input.startedAt,
       Date.now() - input.startedAt,
+    );
+    this.cases.recordExecution(
+      input.componentId,
+      input.testType,
+      input.status,
+      input.startedAt,
     );
   }
 }

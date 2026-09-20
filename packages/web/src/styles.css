@@ -201,6 +201,12 @@ main {
   background: var(--primary-strong);
 }
 
+.primary-button.compact {
+  height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
 .primary-button:disabled,
 .icon-button:disabled {
   opacity: 0.5;
@@ -448,6 +454,59 @@ textarea {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 12px;
+}
+
+.case-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.test-case-detail td {
+  background: #f8fafb;
+  padding: 14px 16px;
+}
+
+.test-case-detail strong {
+  display: inline-block;
+  min-width: 52px;
+}
+
+.step-list,
+.assertion-list {
+  margin: 8px 0 10px 52px;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.report-preview {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.report-preview h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.report-preview .panel-heading {
+  margin-bottom: 10px;
+}
+
+.report-preview pre {
+  margin: 0;
+  max-height: calc(100vh - 260px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fafbfc;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 1000px) {

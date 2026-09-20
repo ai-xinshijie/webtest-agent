@@ -46,6 +46,23 @@ function setup(): { database: DatabaseManager; sessionId: string } {
     INSERT INTO test_results (id, session_id, component_id, test_type, status, input_json, output_json, started_at, duration_ms)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run('result-1', 'session-1', 'component-1', 'form-submit', 'passed', '{}', '{}', 2000, 500);
+  db.prepare(`
+    INSERT INTO navigation_macros (id, target_id, component_id, steps_json, url, selector, cached_at)
+    VALUES ('macro-1', 'target-1', 'component-1', '[{}]', 'https://example.com/page', '#submit', 1)
+  `).run();
+  db.prepare(`
+    INSERT INTO compiled_test_cases
+      (id, target_id, component_id, test_type, navigation_macro_id, actions_json, assertions_json, timeout, execute_count, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'case-1', 'target-1', 'component-1', 'form-submit', 'macro-1',
+    JSON.stringify([
+      { order: 1, type: 'navigate', description: '进入页面：业务页面', expected: '页面地址为 https://example.com/page' },
+      { order: 2, type: 'action', description: '对“提交按钮”执行提交', selector: '#submit', action: 'form-submit' },
+      { order: 3, type: 'assertion', description: '验证提交结果', expected: '页面稳定' },
+    ]),
+    JSON.stringify(['提交按钮可定位', '页面稳定']), 30000, 1, 1000, 2000,
+  );
 
   const logger = new AgentLogger(db, 'session-1', { consoleOutput: false });
   logger.logScript(
@@ -105,6 +122,10 @@ describe('ReportGenerator', () => {
     expect(report).toContain('| 1 | 1 | 1 | 0 |');
     expect(report).toContain('| 动作 | 3 | 0 | 1 | 0 | 4 | 75.00% |');
     expect(report).toContain('实际覆盖率只计入本会话真正执行的项目');
+    expect(report).toContain('## 测试用例与步骤（1 条）');
+    expect(report).toContain('用例 1：业务页面：提交按钮 - form-submit');
+    expect(report).toContain('对“提交按钮”执行提交');
+    expect(report).toContain('提交按钮可定位');
     expect(report).toContain('## 代码自愈');
     expect(report).toContain('登录异常');
   });
@@ -126,6 +147,32 @@ describe('ReportGenerator', () => {
     expect(parsed.代码自愈[0].rootCause).toBe('登录异常');
     expect(parsed.执行异常).toEqual([]);
     expect(parsed.测试结果[0].输出).toEqual({});
+    expect(parsed.测试用例[0]).toMatchObject({
+      标识: 'case-1', 标题: '业务页面：提交按钮 - form-submit', 执行次数: 1,
+      步骤: expect.arrayContaining([expect.objectContaining({ description: '进入页面：业务页面' })]),
+      断言: ['提交按钮可定位', '页面稳定'],
+    });
+  });
+
+  it('用例尚未执行时在 Markdown 与 JSON 中保留未执行状态', () => {
+    const { database, sessionId } = setup();
+    database.prepare(`
+      INSERT INTO components (id, target_id, page_id, type, selector, label, created_at, updated_at)
+      VALUES ('component-2', 'target-1', 'page-1', 'link', '#help', '帮助', 1, 1)
+    `).run();
+    database.prepare(`
+      INSERT INTO navigation_macros (id, target_id, component_id, steps_json, cached_at)
+      VALUES ('macro-2', 'target-1', 'component-2', '[]', 1)
+    `).run();
+    database.prepare(`
+      INSERT INTO compiled_test_cases (id, target_id, component_id, test_type, navigation_macro_id, actions_json, assertions_json, created_at, updated_at)
+      VALUES ('case-2', 'target-1', 'component-2', 'click', 'macro-2', '[]', '[]', 1, 1)
+    `).run();
+    const markdown = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }).generate(sessionId);
+    expect(markdown).toContain('最近状态**：未执行');
+    expect(markdown).toContain('最近执行时间**：无');
+    const json = JSON.parse(new ReportGenerator(database, { outputDir: tempDir, format: 'json' }).generate(sessionId));
+    expect(json.测试用例.find((item: { 标识: string }) => item.标识 === 'case-2').最近状态).toBeNull();
   });
 
   it('将失败测试作为执行异常呈现，而不混入产品问题列表', () => {
@@ -199,6 +246,8 @@ describe('ReportGenerator', () => {
     database.prepare('DELETE FROM pages').run();
     database.prepare('DELETE FROM bugs').run();
     database.prepare('DELETE FROM test_results').run();
+    database.prepare('DELETE FROM compiled_test_cases').run();
+    database.prepare('DELETE FROM navigation_macros').run();
     database.prepare('DELETE FROM agent_logs').run();
     database.prepare('DELETE FROM hot_patch_reports').run();
     database.prepare('UPDATE sessions SET ended_at = NULL, progress_json = NULL, status = ? WHERE id = ?').run('custom', sessionId);
@@ -207,6 +256,7 @@ describe('ReportGenerator', () => {
     expect(markdown).toContain('本次会话尚未生成深度覆盖快照。');
     expect(markdown).toContain('本次测试未发现问题。');
     expect(markdown).toContain('本次会话未触发代码级自愈。');
+    expect(markdown).toContain('本次会话尚未编译可重放测试用例。');
     expect(markdown).toContain('暂无审计日志');
 
     const generator = new ReportGenerator(database, { outputDir: tempDir, format: 'md' }) as any;

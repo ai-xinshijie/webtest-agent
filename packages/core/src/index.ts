@@ -7,6 +7,7 @@ export { AgentSelfHealer } from './healing/AgentSelfHealer.js';
 export { CodeSelfHealer, StrategyRegistry } from './healing/CodeSelfHealer.js';
 export { ExplorationFrontier } from './exploration/ExplorationFrontier.js';
 export { InteractionExecutor } from './tester/InteractionExecutor.js';
+export { TestCaseManager } from './tester/TestCaseManager.js';
 export { BFSExplorer } from './exploration/BFSExplorer.js';
 export { ScreenshotManager } from './reporter/ScreenshotManager.js';
 export { ReportGenerator } from './reporter/ReportGenerator.js';
@@ -41,6 +42,7 @@ export type { NetworkFault, NetworkFaultType } from './testing/NetworkFaultInjec
 export type { StateNode, StateTransition } from './testing/StateGraph.js';
 export type { OracleVerdict } from './testing/SemanticOracle.js';
 export type { MCPTool } from './plugin/MCPClient.js';
+export type { CompiledTestCase, TestCaseStep } from './tester/TestCaseManager.js';
 export type {
   CodeRepairContext, CodeSelfHealerOptions, CommandResult, HotPatchReport, HotPatchStatus, RepairProposal, SourcePatch,
 } from './healing/CodeSelfHealer.js';

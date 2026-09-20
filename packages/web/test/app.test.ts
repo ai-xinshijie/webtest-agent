@@ -124,6 +124,27 @@ const plugins = [{
   description: '停用示例',
 }];
 
+const testCases = [{
+  id: 'case-1',
+  targetId: 'demo',
+  pageUrl: 'https://demo.test/form',
+  pageTitle: '表单页',
+  componentLabel: '提交按钮',
+  componentType: 'button',
+  testType: 'click',
+  title: '表单页：提交按钮 - 点击',
+  steps: [
+    { order: 1, type: 'navigate', description: '进入页面：表单页', expected: '页面地址正确' },
+    { order: 2, type: 'action', description: '对“提交按钮”执行点击' },
+    { order: 3, type: 'assertion', description: '验证操作结果与页面稳定性' },
+  ],
+  assertions: ['目标组件可定位且可交互'],
+  executeCount: 2,
+  lastPassedAt: 1,
+  lastStatus: 'passed',
+  lastExecutedAt: 2,
+}];
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function response(data: unknown, ok = true): Response {
@@ -149,6 +170,10 @@ beforeEach(() => {
     if (url === '/api/reports') {
       return response([{ name: 'report.md', path: 'D:/reports/report.md', format: 'md' }]);
     }
+    if (url === '/api/reports/report.md') return response({ name: 'report.md', format: 'md', content: '# 中文报告\n测试步骤' });
+    if (url === '/api/test-cases?target=demo') return response(testCases);
+    if (url === '/api/test-cases/case-1/run') return response({ sessionId: 'case-session' });
+    if (url === '/api/sessions/case-session/timeline') return response([]);
     if (url === '/api/memory') return response(memory);
     if (url === '/api/plugins') return response(plugins);
     if (url === '/api/config') return response({ browserDir: 'vendor/browsers' });
@@ -273,6 +298,9 @@ describe('Web GUI', () => {
     fireEvent.click(screen.getByRole('button', { name: '报告' }));
     expect(await screen.findByText('report.md')).toBeTruthy();
     expect(screen.getByText('MD')).toBeTruthy();
+    fireEvent.click(screen.getByTitle('查看 report.md'));
+    await waitFor(() => expect(document.querySelector('.report-preview')?.textContent).toContain('# 中文报告\n测试步骤'));
+    fireEvent.click(screen.getByTitle('关闭报告预览'));
 
     fireEvent.click(screen.getByRole('button', { name: '记忆' }));
     expect(await screen.findByText('记忆概览')).toBeTruthy();
@@ -294,6 +322,69 @@ describe('Web GUI', () => {
       expect(call).toBeDefined();
       expect(call![1]!.body).toBe('{"parallel":2}');
     });
+  });
+
+  it('展示编译用例步骤、断言并提交单条重跑', async () => {
+    render(createElement(App));
+    await screen.findAllByText('demo');
+    fireEvent.click(screen.getByRole('button', { name: '用例' }));
+
+    expect(await screen.findByText('表单页：提交按钮 - 点击')).toBeTruthy();
+    expect(screen.getByText('2')).toBeTruthy();
+    fireEvent.click(screen.getByTitle('展开测试步骤'));
+    expect(screen.getByText('进入页面：表单页（预期：页面地址正确）')).toBeTruthy();
+    expect(screen.getByText('目标组件可定位且可交互')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '运行' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/test-cases/case-1/run', expect.objectContaining({ method: 'POST' })));
+    const runCall = fetchMock.mock.calls.find(call => String(call[0]) === '/api/test-cases/case-1/run')!;
+    expect(JSON.parse(String(runCall[1]!.body))).toEqual({ headless: true });
+    expect(await screen.findByText('执行时间线')).toBeTruthy();
+  });
+
+  it('用例重跑缺少会话标识时仍进入监控，并显示未执行状态', async () => {
+    const originalFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/test-cases/case-1/run') return response({});
+      if (String(input) === '/api/test-cases?target=demo') return response([{ ...testCases[0], lastStatus: null }]);
+      return originalFetch(input, init);
+    });
+    render(createElement(App));
+    await screen.findAllByText('demo');
+    fireEvent.click(screen.getByRole('button', { name: '用例' }));
+    expect(await screen.findByText('未执行')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '运行' }));
+    expect(await screen.findByText('执行时间线')).toBeTruthy();
+  });
+
+  it('没有目标时用例页请求未过滤的列表', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/targets' || url === '/api/sessions') return response([]);
+      if (url === '/api/test-cases') return response([]);
+      return response([]);
+    });
+    render(createElement(App));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/targets'));
+    fireEvent.click(screen.getByRole('button', { name: '用例' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/test-cases'));
+  });
+
+  it('用例页切换目标时重新按目标加载用例', async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === '/api/targets') return response([target, { ...target, name: 'second', url: 'https://second.test' }]);
+      if (url === '/api/sessions') return response([]);
+      if (url === '/api/test-cases?target=demo') return response(testCases);
+      if (url === '/api/test-cases?target=second') return response([]);
+      return response([]);
+    });
+    render(createElement(App));
+    await screen.findAllByText('demo');
+    fireEvent.click(screen.getByRole('button', { name: '用例' }));
+    await screen.findByText('表单页：提交按钮 - 点击');
+    fireEvent.change(screen.getByLabelText('用例测试目标'), { target: { value: 'second' } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/test-cases?target=second'));
   });
 
   it('支持刷新、切换目标和从最近会话进入监控', async () => {

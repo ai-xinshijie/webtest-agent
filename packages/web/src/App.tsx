@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Brain,
   FileText,
   Gauge,
+  ListChecks,
   Play,
   Plug,
   RefreshCw,
@@ -12,7 +13,7 @@ import {
   PanelsTopLeft,
 } from 'lucide-react';
 
-type View = 'dashboard' | 'monitor' | 'reports' | 'memory' | 'plugins' | 'settings';
+type View = 'dashboard' | 'monitor' | 'cases' | 'reports' | 'memory' | 'plugins' | 'settings';
 
 interface TargetConfig {
   name: string;
@@ -66,6 +67,29 @@ interface ReportFile {
   name: string;
   path: string;
   format: 'md' | 'json';
+}
+
+interface TestCase {
+  id: string;
+  targetId: string;
+  pageUrl: string;
+  pageTitle: string;
+  componentLabel: string;
+  componentType: string;
+  testType: string;
+  title: string;
+  steps: Array<{ order: number; type: string; description: string; selector?: string; action?: string; expected?: string }> ;
+  assertions: string[];
+  executeCount: number;
+  lastPassedAt: number | null;
+  lastStatus: string | null;
+  lastExecutedAt: number | null;
+}
+
+interface ReportContent {
+  name: string;
+  format: 'md' | 'json';
+  content: string;
 }
 
 interface MemoryData {
@@ -136,6 +160,9 @@ export default function App() {
   const [timeline, setTimeline] = useState<TimelineLog[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [reports, setReports] = useState<ReportFile[]>([]);
+  const [reportContent, setReportContent] = useState<ReportContent | null>(null);
+  const [testCases, setTestCases] = useState<TestCase[]>([]);
+  const [expandedCases, setExpandedCases] = useState<Record<string, boolean>>({});
   const [memory, setMemory] = useState<MemoryData | null>(null);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [configText, setConfigText] = useState('');
@@ -189,6 +216,13 @@ export default function App() {
       .then(response => response.json())
       .then((data: ReportFile[]) => setReports(data));
   }, [view]);
+
+  useEffect(() => {
+    if (view !== 'cases') return;
+    void fetch(`/api/test-cases${selectedTarget ? `?target=${encodeURIComponent(selectedTarget)}` : ''}`)
+      .then(response => response.json())
+      .then((data: TestCase[]) => setTestCases(data));
+  }, [view, selectedTarget]);
 
   useEffect(() => {
     if (view !== 'memory') return;
@@ -274,9 +308,32 @@ export default function App() {
     }
   };
 
+  const runTestCase = async (testCase: TestCase) => {
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/test-cases/${testCase.id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ headless }),
+      });
+      const data = await response.json() as { sessionId?: string };
+      if (data.sessionId) setSelectedSession(data.sessionId);
+      setView('monitor');
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openReport = async (report: ReportFile) => {
+    const response = await fetch(`/api/reports/${encodeURIComponent(report.name)}`);
+    setReportContent(await response.json() as ReportContent);
+  };
+
   const navItems: Array<{ id: View; label: string; icon: typeof Activity }> = [
     { id: 'dashboard', label: '总览', icon: Gauge },
     { id: 'monitor', label: '监控', icon: Activity },
+    { id: 'cases', label: '用例', icon: ListChecks },
     { id: 'reports', label: '报告', icon: FileText },
     { id: 'memory', label: '记忆', icon: Brain },
     { id: 'plugins', label: '插件', icon: Plug },
@@ -491,14 +548,59 @@ export default function App() {
           <section className="panel">
             <h2>测试报告</h2>
             <table>
-              <thead><tr><th>文件</th><th>格式</th><th>路径</th></tr></thead>
+              <thead><tr><th>文件</th><th>格式</th><th>路径</th><th>操作</th></tr></thead>
               <tbody>
                 {reports.map(report => (
                   <tr key={report.path}>
                     <td>{report.name}</td>
                     <td>{report.format.toUpperCase()}</td>
                     <td className="mono">{report.path}</td>
+                    <td><button className="icon-button" title={`查看 ${report.name}`} onClick={() => void openReport(report)}><FileText size={16} /></button></td>
                   </tr>
+                ))}
+              </tbody>
+            </table>
+            {reportContent && (
+              <div className="report-preview">
+                <div className="panel-heading"><h3>{reportContent.name}</h3><button className="icon-button" title="关闭报告预览" onClick={() => setReportContent(null)}><Square size={14} /></button></div>
+                <pre>{reportContent.content}</pre>
+              </div>
+            )}
+          </section>
+        )}
+
+        {view === 'cases' && (
+          <section className="panel">
+            <div className="panel-heading">
+              <h2>测试用例</h2>
+              <select aria-label="用例测试目标" value={selectedTarget} onChange={event => setSelectedTarget(event.target.value)}>
+                {targets.map(target => <option key={target.name} value={target.name}>{target.name}</option>)}
+              </select>
+            </div>
+            <table>
+              <thead><tr><th>用例</th><th>组件</th><th>动作</th><th>执行次数</th><th>最近状态</th><th>操作</th></tr></thead>
+              <tbody>
+                {testCases.map(testCase => (
+                  <Fragment key={testCase.id}>
+                    <tr>
+                      <td>{testCase.title}</td>
+                      <td>{testCase.componentLabel}</td>
+                      <td className="mono">{testCase.testType}</td>
+                      <td>{testCase.executeCount}</td>
+                      <td>{testCase.lastStatus ? statusText[testCase.lastStatus] ?? testCase.lastStatus : '未执行'}</td>
+                      <td className="case-actions">
+                        <button className="icon-button" title="展开测试步骤" onClick={() => setExpandedCases(current => ({ ...current, [testCase.id]: !current[testCase.id] }))}><ListChecks size={16} /></button>
+                        <button className="primary-button compact" disabled={busy} onClick={() => void runTestCase(testCase)}><Play size={15} />运行</button>
+                      </td>
+                    </tr>
+                    {expandedCases[testCase.id] && (
+                      <tr className="test-case-detail"><td colSpan={6}>
+                        <div><strong>页面：</strong><span className="mono">{testCase.pageUrl}</span></div>
+                        <div><strong>步骤：</strong><ol className="step-list">{testCase.steps.map(step => <li key={step.order}>{step.description}{step.expected ? `（预期：${step.expected}）` : ''}</li>)}</ol></div>
+                        <div><strong>断言：</strong><ul className="assertion-list">{testCase.assertions.map(assertion => <li key={assertion}>{assertion}</li>)}</ul></div>
+                      </td></tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

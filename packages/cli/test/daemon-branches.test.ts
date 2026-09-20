@@ -48,13 +48,18 @@ beforeEach(() => {
     health: () => false,
     stopOk: true,
   };
-  fetchMock = vi.fn(async (url: string | URL) => {
+  fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
     const text = String(url);
     if (text.endsWith('/api/health')) {
       fetchState.healthCalls += 1;
       return { ok: fetchState.health() } as Response;
     }
     if (text.endsWith('/api/daemon/stop')) {
+      expect(init).toEqual({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
       return { ok: fetchState.stopOk, status: fetchState.stopOk ? 200 : 500 } as Response;
     }
     return { ok: false, status: 404 } as Response;

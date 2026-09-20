@@ -73,7 +73,11 @@ async function stopDaemon(): Promise<void> {
     return;
   }
 
-  const response = await fetch(`http://127.0.0.1:${port}/api/daemon/stop`, { method: 'POST' });
+  const response = await fetch(`http://127.0.0.1:${port}/api/daemon/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
   if (!response.ok) throw new Error(`停止常驻代理失败：${response.status}`);
 
   for (let index = 0; index < 40; index++) {

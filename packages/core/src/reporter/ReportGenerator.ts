@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import type { DatabaseManager } from '../db/Database.js';
 import path from 'node:path';
+import { TestCaseManager, type CompiledTestCase } from '../tester/TestCaseManager.js';
 
 export interface ReportOptions {
   outputDir: string;
@@ -58,11 +59,12 @@ export class ReportGenerator {
     const progress = session.progress_json ? JSON.parse(session.progress_json) : null;
     const hotPatches = this.getHotPatches(sessionId);
     const stateGraph = this.getStateGraphSummary(sessionId, session.target_id);
+    const testCases = new TestCaseManager(this.db).list(session.target_id);
 
     if (this.options.format === 'json') {
-      return this.generateJSON(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph);
+      return this.generateJSON(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph, testCases);
     }
-    return this.generateMarkdown(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph);
+    return this.generateMarkdown(session, pages, components, bugs, testResults, logs, progress, hotPatches, stateGraph, testCases);
   }
 
   private getLogs(sessionId: string): any[] {
@@ -104,6 +106,7 @@ export class ReportGenerator {
     progress: any,
     hotPatches: any[],
     stateGraph: StateGraphSummary = EMPTY_STATE_GRAPH,
+    testCases: CompiledTestCase[] = [],
   ): string {
     const duration = session.ended_at ? ((session.ended_at - session.started_at) / 1000).toFixed(1) : 'N/A';
     const reportTime = new Date().toISOString();
@@ -154,6 +157,27 @@ export class ReportGenerator {
     md += `\n### 深度覆盖\n\n${this.coverageMarkdown(progress)}`;
     md += '\n### 状态图\n\n| 状态节点 | 状态迁移 | 通过迁移 | 失败迁移 |\n|----------|----------|----------|----------|\n';
     md += '| ' + stateGraph.stateCount + ' | ' + stateGraph.transitionCount + ' | ' + stateGraph.passedTransitionCount + ' | ' + stateGraph.failedTransitionCount + ' |\n';
+
+    md += `\n## 测试用例与步骤（${testCases.length} 条）\n\n`;
+    if (testCases.length === 0) {
+      md += '本次会话尚未编译可重放测试用例。\n';
+    }
+    for (let index = 0; index < testCases.length; index++) {
+      const testCase = testCases[index]!;
+      md += `### 用例 ${index + 1}：${testCase.title}\n\n`;
+      md += `- **组件**：${testCase.componentLabel}（${this.translateComponentType(testCase.componentType)}）\n`;
+      md += `- **动作**：${testCase.testType}\n`;
+      md += `- **执行次数**：${testCase.executeCount}\n`;
+      md += `- **最近状态**：${testCase.lastStatus ? this.translateStatus(testCase.lastStatus) : '未执行'}\n`;
+      md += `- **最近执行时间**：${testCase.lastExecutedAt ? new Date(testCase.lastExecutedAt).toISOString() : '无'}\n`;
+      md += '- **断言**：\n';
+      for (const assertion of testCase.assertions) md += `  - ${assertion}\n`;
+      md += '- **步骤**：\n';
+      for (const step of testCase.steps) {
+        md += `  ${step.order}. ${step.description}${step.expected ? `（预期：${step.expected}）` : ''}\n`;
+      }
+      md += '\n';
+    }
 
     if (bugs.length > 0) {
       md += `\n## 问题列表（${bugs.length} 个）\n\n`;
@@ -223,6 +247,7 @@ export class ReportGenerator {
     progress: any,
     hotPatches: any[],
     stateGraph: StateGraphSummary = EMPTY_STATE_GRAPH,
+    testCases: CompiledTestCase[] = [],
   ): string {
     return JSON.stringify({
       会话: {
@@ -244,6 +269,20 @@ export class ReportGenerator {
         组件范围: this.componentScopeCounts(components),
       },
       深度覆盖: progress?.coverage ?? null,
+      测试用例: testCases.map(testCase => ({
+        标识: testCase.id,
+        标题: testCase.title,
+        页面: testCase.pageUrl,
+        组件: testCase.componentLabel,
+        组件类型: this.translateComponentType(testCase.componentType),
+        动作: testCase.testType,
+        步骤: testCase.steps,
+        断言: testCase.assertions,
+        执行次数: testCase.executeCount,
+        最近通过时间: testCase.lastPassedAt,
+        最近状态: testCase.lastStatus ? this.translateStatus(testCase.lastStatus) : null,
+        最近执行时间: testCase.lastExecutedAt,
+      })),
       状态图: {
         状态节点数: stateGraph.stateCount,
         状态迁移数: stateGraph.transitionCount,

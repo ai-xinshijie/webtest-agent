@@ -121,6 +121,16 @@ describe('GUI API', () => {
       expect.objectContaining({ name: 'demo.md', format: 'md', size: Buffer.byteLength('# 中文报告') }),
       expect.objectContaining({ name: 'demo.json', format: 'json', size: 11 }),
     ]);
+    const report = await app.inject({ method: 'GET', url: '/api/reports/demo.md' });
+    expect(report.json()).toEqual({ name: 'demo.md', format: 'md', content: '# 中文报告' });
+    const jsonReport = await app.inject({ method: 'GET', url: '/api/reports/demo.json' });
+    expect(jsonReport.json()).toEqual({ name: 'demo.json', format: 'json', content: '{"ok":true}' });
+    const invalidReport = await app.inject({ method: 'GET', url: '/api/reports/..%2Fsecret.md' });
+    expect(invalidReport.statusCode).toBe(500);
+    expect(invalidReport.json().message).toBe('报告文件名不合法');
+    const missingReport = await app.inject({ method: 'GET', url: '/api/reports/missing.md' });
+    expect(missingReport.statusCode).toBe(500);
+    expect(missingReport.json().message).toBe('未找到报告文件：missing.md');
 
     const memoryResponse = await app.inject({ method: 'GET', url: '/api/memory' });
     expect(memoryResponse.json()).toMatchObject({

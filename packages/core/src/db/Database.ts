@@ -260,6 +260,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_page_fingerprints_target ON memory_page_fi
 CREATE INDEX IF NOT EXISTS idx_agent_logs_session ON agent_logs(session_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_agent_logs_source ON agent_logs(session_id, source);
 CREATE INDEX IF NOT EXISTS idx_hot_patch_reports_session ON hot_patch_reports(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_compiled_test_cases_target ON compiled_test_cases(target_id);
+CREATE INDEX IF NOT EXISTS idx_compiled_test_cases_component_action ON compiled_test_cases(component_id, test_type);
 `;
 
 export class DatabaseManager {

@@ -8,6 +8,7 @@ import { DatabaseManager } from '../db/Database.js';
 import { classifyComponent, classifyComponentScope, type ComponentModel, type Component } from '../cognition/ComponentModel.js';
 import { InteractionExecutor } from '../tester/InteractionExecutor.js';
 import { TestEngine, type TestEngineResult } from '../tester/TestEngine.js';
+import { TestCaseManager } from '../tester/TestCaseManager.js';
 import { BFSExplorer } from '../exploration/BFSExplorer.js';
 import { ComponentRevealer } from '../exploration/ComponentRevealer.js';
 import { AuthSessionManager } from '../auth/AuthSessionManager.js';
@@ -47,6 +48,7 @@ export interface RunOptions {
   resumeSessionId?: string;
   sessionId?: string;
   maxDuration?: number;
+  caseIds?: string[];
 }
 
 interface PageRow {
@@ -79,7 +81,8 @@ export class Orchestrator {
   async run(target: TargetConfig, options: RunOptions = {}): Promise<Session> {
     const runMode = options.runMode ?? target.strategy.runMode;
     if (runMode === 'fresh') this.memory.clear(target.name);
-    if (runMode === 'retest') this.memory.clearTestedItems(target.name);
+    // 单条用例重跑需要强制执行选中动作，但不能丢弃同一目标其他动作的可复用经验。
+    if (runMode === 'retest' && !options.caseIds?.length) this.memory.clearTestedItems(target.name);
 
     const existingSession = options.resumeSessionId
       ? this.loadSessionRow(options.resumeSessionId)
@@ -330,6 +333,13 @@ export class Orchestrator {
         { status: 'success', duration: 0, output: explorationResult },
         { pageUrl: page.url(), phase: 'explore' },
       );
+      const cases = new TestCaseManager(this.db).compileTarget(target.name);
+      logger.logScript(
+        { description: '编译可重放测试用例', module: 'TestCaseManager', method: 'compileTarget' },
+        { type: 'compile-test-cases', target: target.name, params: { count: cases.length } },
+        { status: 'success', duration: 0, output: { count: cases.length } },
+        { pageUrl: page.url(), phase: 'explore' },
+      );
       assertWithinDeadline();
     }
 
@@ -343,6 +353,13 @@ export class Orchestrator {
 
     session.phase = requestedPhase ?? 'test';
     this.updateSessionPhase(session);
+    const compiledCases = new TestCaseManager(this.db).compileTarget(target.name);
+    logger.logScript(
+      { description: '更新可重放测试用例', module: 'TestCaseManager', method: 'compileTarget' },
+      { type: 'compile-test-cases', target: target.name, params: { count: compiledCases.length } },
+      { status: 'success', duration: 0, output: { count: compiledCases.length } },
+      { pageUrl: page.url(), phase: 'test' },
+    );
 
     const parallel = Math.max(1, Math.min(
       options.parallel ?? target.strategy.parallel ?? this.config.parallel,
@@ -375,6 +392,7 @@ export class Orchestrator {
         enablePaths: index === 0,
         enableChaos: index === 0,
         deadlineAt,
+        caseIds: options.caseIds,
       });
       return engine.run(workerPage, assignedPages);
     });

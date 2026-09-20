@@ -14,6 +14,7 @@ import { modelCommand } from './commands/model.js';
 import { mcpCommand } from './commands/mcp.js';
 import { statusCommand, stopCommand } from './commands/session.js';
 import { authCommand } from './commands/auth.js';
+import { caseCommand } from './commands/case.js';
 
 export function createProgram(): Command {
   const program = new Command();
@@ -40,6 +41,7 @@ export function createProgram(): Command {
   program.addCommand(statusCommand);
   program.addCommand(stopCommand);
   program.addCommand(authCommand);
+  program.addCommand(caseCommand);
 
   return program;
 }

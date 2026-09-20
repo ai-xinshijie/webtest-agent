@@ -112,6 +112,37 @@ function createEngine(
 }
 
 describe('TestEngine', () => {
+  it('指定用例时仅执行目标动作并回写用例执行次数', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'button-1', 'page-1', 'button', '#button-1');
+    db.prepare(`
+      INSERT INTO navigation_macros (id, target_id, component_id, steps_json, cached_at)
+      VALUES ('macro-1', 'demo', 'button-1', '[]', 1)
+    `).run();
+    db.prepare(`
+      INSERT INTO compiled_test_cases
+        (id, target_id, component_id, test_type, navigation_macro_id, actions_json, assertions_json, created_at, updated_at)
+      VALUES ('case-click', 'demo', 'button-1', 'click', 'macro-1', '[]', '[]', 1, 1)
+    `).run();
+    const executor = createExecutor();
+
+    const selected = await createEngine(db, new MemoryManager(db), executor, {
+      runMode: 'fresh', phase: 'test', enableChaos: false, caseIds: ['case-click'],
+    }).run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(selected.executedActions).toBe(1);
+    expect(executor.executeAction).toHaveBeenCalledTimes(1);
+    expect(executor.executeAction).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'click', expect.anything());
+    expect(db.prepare(`SELECT execute_count, last_passed_at FROM compiled_test_cases WHERE id = 'case-click'`).get()).toEqual({ execute_count: 1, last_passed_at: expect.any(Number) });
+
+    const missing = await createEngine(db, new MemoryManager(db), createExecutor(), {
+      runMode: 'fresh', phase: 'test', enableChaos: false, caseIds: ['missing'],
+    }).run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(missing.executedActions).toBe(0);
+    expect(missing.coverage.actions).toEqual({ visited: 0, reused: 0, blocked: 0, pending: 0, percentage: 0, resolvedPercentage: 0 });
+    db.close();
+  });
+
   it('历史记录缺少页面指纹时强制重测，失败仍计入覆盖', async () => {
     const db = createDatabase();
     addPage(db, 'page-1', 'https://example.com/page');

@@ -109,7 +109,32 @@ describe('GUI 运行控制接口', () => {
       INSERT INTO sessions (id, target_id, status, started_at, phase)
       VALUES ('session-1', 'demo', 'paused', 1, 'test')
     `).run();
+    db.prepare(`
+      INSERT INTO pages (id, target_id, url_pattern, title, first_seen_at, last_visited_at)
+      VALUES ('page-1', 'demo', 'https://example.com/page', '页面', 1, 1)
+    `).run();
+    db.prepare(`
+      INSERT INTO components (id, target_id, page_id, type, selector, label, created_at, updated_at)
+      VALUES ('component-1', 'demo', 'page-1', 'button', '#button', '按钮', 1, 1)
+    `).run();
+    db.prepare(`
+      INSERT INTO navigation_macros (id, target_id, component_id, steps_json, cached_at)
+      VALUES ('macro-1', 'demo', 'component-1', '[]', 1)
+    `).run();
+    db.prepare(`
+      INSERT INTO compiled_test_cases (id, target_id, component_id, test_type, navigation_macro_id, actions_json, assertions_json, created_at, updated_at)
+      VALUES ('case-1', 'demo', 'component-1', 'click', 'macro-1', '[]', '["按钮可点击"]', 1, 1)
+    `).run();
     db.close();
+
+    const testCases = await app.inject({ method: 'GET', url: '/api/test-cases?target=demo' });
+    expect(testCases.json()).toEqual([expect.objectContaining({ id: 'case-1', componentLabel: '按钮' })]);
+    const missingCase = await app.inject({ method: 'POST', url: '/api/test-cases/missing/run', payload: {} });
+    expect(missingCase.statusCode).toBe(500);
+    expect(missingCase.json().message).toBe('未找到测试用例：missing');
+    const caseRun = await app.inject({ method: 'POST', url: '/api/test-cases/case-1/run', payload: { headless: false } });
+    expect(caseRun.statusCode).toBe(202);
+    expect(caseRun.json()).toMatchObject({ status: 'running', testCaseId: 'case-1' });
 
     const run = await app.inject({
       method: 'POST',
@@ -148,6 +173,10 @@ describe('GUI 运行控制接口', () => {
         headless: false,
       }),
     );
+    expect(instance.run).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'demo' }),
+      expect.objectContaining({ runMode: 'retest', phase: 'test', parallel: 1, headless: false, caseIds: ['case-1'] }),
+    );
 
     const resume = await app.inject({ method: 'POST', url: '/api/sessions/session-1/resume' });
     expect(resume.statusCode).toBe(200);
@@ -163,6 +192,19 @@ describe('GUI 运行控制接口', () => {
     await new Promise(resolve => setImmediate(resolve));
     expect(errors.join('\n')).toContain('测试会话执行失败');
     expect(errors.join('\n')).toContain('浏览器启动失败');
+
+    instance.run.mockRejectedValueOnce(new Error('用例执行失败'));
+    const failedCaseRun = await app.inject({ method: 'POST', url: '/api/test-cases/case-1/run' });
+    expect(failedCaseRun.statusCode).toBe(202);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(errors.join('\n')).toContain('测试用例执行失败');
+    expect(errors.join('\n')).toContain('用例执行失败');
+
+    instance.run.mockRejectedValueOnce('字符串错误');
+    const stringFailedCaseRun = await app.inject({ method: 'POST', url: '/api/test-cases/case-1/run' });
+    expect(stringFailedCaseRun.statusCode).toBe(202);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(errors.join('\n')).toContain('字符串错误');
 
     const reports = await app.inject({ method: 'GET', url: '/api/reports' });
     expect(reports.json()).toEqual([]);

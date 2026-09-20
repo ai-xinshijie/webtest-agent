@@ -289,15 +289,20 @@ describe('Orchestrator', () => {
     await orchestrator.close();
   });
 
-  it('fresh 和 retest 模式清理对应记忆', async () => {
+  it('fresh 和完整 retest 模式清理对应记忆，单条用例重跑保留其余经验', async () => {
     insertTarget();
     insertPage('page-1', '/page');
     const orchestrator = new Orchestrator(createConfig());
 
     await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, runMode: 'fresh' } }), { sessionId: 'fresh' });
     await orchestrator.run(createTarget({ strategy: { ...createTarget().strategy, runMode: 'retest' } }), { sessionId: 'retest' });
+    await orchestrator.run(
+      createTarget({ strategy: { ...createTarget().strategy, runMode: 'retest' } }),
+      { sessionId: 'single-case-retest', phase: 'test', caseIds: ['case-1'] },
+    );
 
     expect(mocks.clearMemory).toHaveBeenCalledWith('demo');
+    expect(mocks.clearTestedItems).toHaveBeenCalledTimes(1);
     expect(mocks.clearTestedItems).toHaveBeenCalledWith('demo');
     await orchestrator.close();
   });
