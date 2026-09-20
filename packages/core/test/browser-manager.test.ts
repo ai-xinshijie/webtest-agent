@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,6 +27,11 @@ vi.mock('playwright', () => ({
   webkit: { launch: mocks.webkitLaunch },
 }));
 
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, chmodSync: vi.fn(actual.chmodSync) };
+});
+
 import { BrowserManager } from '../src/browser/BrowserManager.js';
 
 let tempDir = '';
@@ -41,6 +46,7 @@ beforeEach(() => {
   mocks.chromiumLaunch.mockClear();
   mocks.firefoxLaunch.mockClear();
   mocks.webkitLaunch.mockClear();
+  vi.mocked(chmodSync).mockClear().mockImplementation(() => undefined);
 });
 
 afterEach(() => {
@@ -104,6 +110,26 @@ describe('BrowserManager', () => {
 
     expect(manager.isBrowserAvailable('chromium')).toBe(true);
     expect(executable).toBeTruthy();
+  });
+
+  it('Linux 启动时补齐内置浏览器执行权限', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    const executable = createExecutable('chrome-headless-shell');
+    const manager = new BrowserManager(tempDir);
+
+    await manager.launch({ headless: true });
+
+    expect(chmodSync).toHaveBeenCalledWith(executable, 0o755);
+  });
+
+  it('Linux 权限修复失败时给出可定位错误', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    createExecutable('chrome-headless-shell');
+    vi.mocked(chmodSync).mockImplementation(() => { throw new Error('权限拒绝'); });
+
+    await expect(new BrowserManager(tempDir).launch()).rejects.toThrow('无法赋予内置浏览器执行权限');
+    vi.mocked(chmodSync).mockImplementation(() => { throw '文本权限拒绝'; });
+    await expect(new BrowserManager(tempDir).launch()).rejects.toThrow('文本权限拒绝');
   });
 
   it('复用同一浏览器并在切换类型时关闭旧浏览器', async () => {

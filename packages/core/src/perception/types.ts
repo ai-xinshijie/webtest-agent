@@ -54,6 +54,7 @@ export interface StructuredObservation {
   dialogCount: number;
   loadingOverlayCount: number;
   networkEvents: NetworkEvent[];
+  consoleEvents: string[];
 }
 
 export interface NetworkEvent {

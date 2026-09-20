@@ -124,6 +124,11 @@ describe('AgentSelfHealer', () => {
     vi.useRealTimers();
   });
 
+  it('零次重试配置直接执行操作', async () => {
+    const healer = new AgentSelfHealer() as any;
+    await expect(healer.retryWithBackoff(async () => '直接执行', 0, [])).resolves.toBe('直接执行');
+  });
+
   it('非 Error 错误转换为中文可读原因', async () => {
     const healer = new AgentSelfHealer();
     const result = await healer.executeSafely(async () => {

@@ -46,6 +46,7 @@ export interface RunOptions {
   parallel?: number;
   resumeSessionId?: string;
   sessionId?: string;
+  maxDuration?: number;
 }
 
 interface PageRow {
@@ -217,6 +218,13 @@ export class Orchestrator {
     const logger = session.logger;
     if (!logger) throw new Error('会话日志器尚未初始化');
     this.executor.setLogger(logger);
+    const maxDurationSeconds = options.maxDuration ?? target.strategy.maxDuration;
+    const deadlineAt = maxDurationSeconds > 0 ? Date.now() + maxDurationSeconds * 1000 : undefined;
+    const assertWithinDeadline = () => {
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+        throw new Error('测试会话已达到最大运行时长，未执行项目保留为待覆盖');
+      }
+    };
 
     const headless = options.headless ?? this.shouldHeadless();
     const sessionDir = path.join(process.cwd(), '.wta', 'sessions');
@@ -241,12 +249,14 @@ export class Orchestrator {
       }),
       { phase: 'login' },
     );
+    assertWithinDeadline();
     const page = await logger.runScript(
       { description: '创建浏览器页面', module: 'BrowserManager', method: 'newPage' },
       { type: 'new-page' },
       () => context.newPage(),
       { phase: 'login' },
     );
+    assertWithinDeadline();
     session.currentPage = page;
 
     await logger.runScript(
@@ -258,6 +268,7 @@ export class Orchestrator {
       }),
       { pageUrl: target.url, phase: 'login' },
     );
+    assertWithinDeadline();
 
     const auth = new AuthSessionManager(logger);
     const loginResult = await auth.login(page, target, { pageUrl: page.url(), phase: 'login' });
@@ -295,7 +306,9 @@ export class Orchestrator {
         {
           maxPages: target.strategy.maxPages,
           maxDepth: target.strategy.depth === 'deep' ? 6 : target.strategy.depth === 'standard' ? 4 : 2,
+          includePaths: target.scope.includePaths,
           excludePaths: target.scope.excludePaths,
+          deadlineAt,
         },
         logger,
         revealer,
@@ -317,6 +330,7 @@ export class Orchestrator {
         { status: 'success', duration: 0, output: explorationResult },
         { pageUrl: page.url(), phase: 'explore' },
       );
+      assertWithinDeadline();
     }
 
     if (requestedPhase === 'explore') {
@@ -360,6 +374,7 @@ export class Orchestrator {
         phase: requestedPhase,
         enablePaths: index === 0,
         enableChaos: index === 0,
+        deadlineAt,
       });
       return engine.run(workerPage, assignedPages);
     });
@@ -453,34 +468,48 @@ export class Orchestrator {
         blocked: acc.actions.blocked + item.coverage.actions.blocked,
         pending: acc.actions.pending + item.coverage.actions.pending,
         percentage: 0,
+        resolvedPercentage: 0,
       },
       combinations: {
         covered: acc.combinations.covered + item.coverage.combinations.covered,
+        blocked: acc.combinations.blocked + item.coverage.combinations.blocked,
         total: acc.combinations.total + item.coverage.combinations.total,
         percentage: 0,
+        resolvedPercentage: 0,
       },
       paths: {
         covered: acc.paths.covered + item.coverage.paths.covered,
+        blocked: acc.paths.blocked + item.coverage.paths.blocked,
         total: acc.paths.total + item.coverage.paths.total,
         percentage: 0,
+        resolvedPercentage: 0,
       },
     }), {
-      actions: { visited: 0, blocked: 0, pending: 0, percentage: 0 },
-      combinations: { covered: 0, total: 0, percentage: 0 },
-      paths: { covered: 0, total: 0, percentage: 0 },
+      actions: { visited: 0, blocked: 0, pending: 0, percentage: 0, resolvedPercentage: 0 },
+      combinations: { covered: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
+      paths: { covered: 0, blocked: 0, total: 0, percentage: 0, resolvedPercentage: 0 },
     });
 
     const actionTotal = coverage.actions.visited + coverage.actions.blocked
       + coverage.actions.pending;
     coverage.actions.percentage = actionTotal === 0
       ? 100
+      : (coverage.actions.visited / actionTotal) * 100;
+    coverage.actions.resolvedPercentage = actionTotal === 0
+      ? 100
       : ((coverage.actions.visited + coverage.actions.blocked) / actionTotal) * 100;
     coverage.combinations.percentage = coverage.combinations.total === 0
       ? 100
       : (coverage.combinations.covered / coverage.combinations.total) * 100;
+    coverage.combinations.resolvedPercentage = coverage.combinations.total === 0
+      ? 100
+      : ((coverage.combinations.covered + coverage.combinations.blocked) / coverage.combinations.total) * 100;
     coverage.paths.percentage = coverage.paths.total === 0
       ? 100
       : (coverage.paths.covered / coverage.paths.total) * 100;
+    coverage.paths.resolvedPercentage = coverage.paths.total === 0
+      ? 100
+      : ((coverage.paths.covered + coverage.paths.blocked) / coverage.paths.total) * 100;
 
     return {
       executedActions: results.reduce((sum, item) => sum + item.executedActions, 0),
@@ -659,9 +688,9 @@ export class Orchestrator {
     for (const rule of BUILTIN_RULES as QualityRule[]) {
       if (rule.id === 'QR001' || rule.id === 'QR002') {
         logger.logScript(
-          { description: `跳过需要操作前后的质量规则：${rule.id}`, module: 'Orchestrator', method: 'runQualityRules' },
+          { description: `跳过会话级重复质量规则：${rule.id}`, module: 'Orchestrator', method: 'runQualityRules' },
           { type: 'quality-rule', target: rule.id, params: { ruleName: rule.name } },
-          { status: 'skipped', duration: 0, output: { reason: '规则需要操作前后状态对比' } },
+          { status: 'skipped', duration: 0, output: { reason: '该规则已在每个动作的前后状态中执行' } },
           { pageUrl: observation.url, phase: 'test' },
         );
         continue;

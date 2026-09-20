@@ -106,8 +106,9 @@ export const QR002: QualityRule = {
   appliesTo: ['form', 'input', 'select', 'textarea'],
   async check(ctx) {
     // If action was a form submission with invalid input
-    const isFormSubmit = ctx.action.type === 'click' &&
-      (ctx.action.target.includes('submit') || ctx.action.target.includes('button'));
+    const isFormSubmit = ctx.action.type.startsWith('submit')
+      || (ctx.action.type === 'click'
+        && (ctx.action.target.includes('submit') || ctx.action.target.includes('button')));
 
     if (!isFormSubmit) return { score: 1.0, verdict: 'pass', confidence: 1.0 };
 
@@ -163,14 +164,14 @@ export const QR006: QualityRule = {
     // Check for infinite loading
     const isLoading = ctx.after.loadingOverlayCount > 0;
 
-    if (hasConsoleErrors || serverErrors.length > 0 || isBlank) {
+    if (hasConsoleErrors || serverErrors.length > 0 || isBlank || isLoading) {
       return {
         score: 0.0,
         verdict: 'fail',
         confidence: 0.95,
         violation: {
           ruleId: 'QR006',
-          description: `检测到异常: ${hasConsoleErrors ? 'JS错误' : serverErrors.length ? '服务器错误' : '页面空白'}`,
+          description: `检测到异常: ${hasConsoleErrors ? 'JS错误' : serverErrors.length ? '服务器错误' : isBlank ? '页面空白' : '持续加载'}`,
           evidence: {
             consoleLog: ctx.consoleLog.slice(0, 10),
             networkLog: serverErrors.map(n => ({ url: n.url, status: n.status })),

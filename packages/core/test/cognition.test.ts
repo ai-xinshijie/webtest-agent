@@ -138,6 +138,17 @@ describe('质量规则', () => {
     });
     expect(result.verdict).toBe('fail');
     expect(result.violation?.severity).toBe('critical');
+
+    const submitAction = await QR002.check({
+      before: createObservation(),
+      after: createObservation(),
+      action: { type: 'submit-empty', target: '#form' },
+      networkLog: [{ url: 'https://example.com/api/submit', method: 'POST' }],
+      consoleLog: [],
+      componentModel: null,
+      memory: null,
+    });
+    expect(submitAction.verdict).toBe('fail');
   });
 
   it('QR002：非表单提交或存在验证信息时通过', async () => {
@@ -237,6 +248,18 @@ describe('质量规则', () => {
     expect(referenceError.verdict).toBe('fail');
     expect(blankPage.verdict).toBe('fail');
     expect(blankPage.violation?.description).toContain('页面空白');
+
+    const loadingPage = await QR006.check({
+      before: createObservation(),
+      after: createObservation({ components: [createComponent()], loadingOverlayCount: 1 }),
+      action: { type: 'click', target: '#a' },
+      networkLog: [],
+      consoleLog: [],
+      componentModel: null,
+      memory: null,
+    });
+    expect(loadingPage.verdict).toBe('fail');
+    expect(loadingPage.violation?.description).toContain('持续加载');
   });
 
   it('QR006：页面有内容且无异常时通过', async () => {

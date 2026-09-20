@@ -350,6 +350,27 @@ describe('Orchestrator', () => {
     await orchestrator.close();
   });
 
+  it('会话达到最大运行时长后停止执行并保留错误证据', async () => {
+    insertTarget();
+    const orchestrator = new Orchestrator(createConfig());
+    await expect(orchestrator.run(createTarget(), {
+      sessionId: 'deadline',
+      maxDuration: Number.MIN_VALUE,
+    })).rejects.toThrow('最大运行时长');
+    expect((orchestrator.getStatus() as Map<string, any>).get('deadline')?.status).toBe('failed');
+    await orchestrator.close();
+  });
+
+  it('最大运行时长为零时允许不设期限的会话启动', async () => {
+    insertTarget();
+    const orchestrator = new Orchestrator(createConfig());
+    const session = await orchestrator.run(createTarget({
+      strategy: { ...createTarget().strategy, maxDuration: 0 },
+    }), { sessionId: 'no-deadline', phase: 'explore' });
+    expect(session.status).toBe('completed');
+    await orchestrator.close();
+  });
+
   it('浏览器崩溃后自愈重启并继续执行', async () => {
     insertTarget();
     insertPage('page-1', '/page');
@@ -486,13 +507,14 @@ describe('Orchestrator', () => {
     const merged = orchestrator.mergeResults([mocks.testResult, {
       ...mocks.testResult,
       coverage: {
-        actions: { visited: 1, blocked: 1, pending: 1, percentage: 0 },
-        combinations: { covered: 1, total: 2, percentage: 0 },
-        paths: { covered: 1, total: 2, percentage: 0 },
+        actions: { visited: 1, blocked: 1, pending: 1, percentage: 0, resolvedPercentage: 0 },
+        combinations: { covered: 1, blocked: 0, total: 2, percentage: 0, resolvedPercentage: 0 },
+        paths: { covered: 1, blocked: 0, total: 2, percentage: 0, resolvedPercentage: 0 },
       },
     }]);
     expect(merged.executedActions).toBe(2);
-    expect(merged.coverage.actions.percentage).toBe(75);
+    expect(merged.coverage.actions.percentage).toBe(50);
+    expect(merged.coverage.actions.resolvedPercentage).toBe(75);
     expect(merged.coverage.combinations.percentage).toBeCloseTo(66.67);
     await orchestrator.close();
   });

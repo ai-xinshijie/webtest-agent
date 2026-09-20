@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 export interface ScreenshotInfo {

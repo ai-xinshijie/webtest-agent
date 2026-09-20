@@ -137,7 +137,7 @@ describe('TestEngine', () => {
 
     expect(result.executedActions).toBe(4);
     expect(result.skippedActions).toBe(1);
-    expect(result.coverage.actions).toEqual({ visited: 5, blocked: 0, pending: 0, percentage: 100 });
+    expect(result.coverage.actions).toEqual({ visited: 5, blocked: 0, pending: 0, percentage: 100, resolvedPercentage: 100 });
 
     const statuses = (db.prepare('SELECT status, COUNT(*) AS count FROM test_results GROUP BY status').all() as any[])
       .reduce((acc, row) => ({ ...acc, [row.status]: row.count }), {});
@@ -164,7 +164,7 @@ describe('TestEngine', () => {
     expect(executor.executeAction).not.toHaveBeenCalled();
     expect(result.executedActions).toBe(0);
     expect(result.skippedActions).toBe(4);
-    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 4, pending: 0, percentage: 100 });
+    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 4, pending: 0, percentage: 0, resolvedPercentage: 100 });
     const reasons = (db.prepare('SELECT output_json FROM test_results').all() as Array<{ output_json: string }>)
       .map(row => JSON.parse(row.output_json).reason)
       .sort();
@@ -200,8 +200,8 @@ describe('TestEngine', () => {
     expect(first.executedActions).toBe(6);
     expect(first.executedCombinations).toBe(5);
     expect(first.executedPaths).toBe(1);
-    expect(first.coverage.combinations).toEqual({ covered: 5, total: 5, percentage: 100 });
-    expect(first.coverage.paths).toEqual({ covered: 1, total: 1, percentage: 100 });
+    expect(first.coverage.combinations).toEqual({ covered: 5, blocked: 0, total: 5, percentage: 100, resolvedPercentage: 100 });
+    expect(first.coverage.paths).toEqual({ covered: 1, blocked: 0, total: 1, percentage: 100, resolvedPercentage: 100 });
 
     const second = await createEngine(db, memory, createExecutor(), {
       runMode: 'continue',
@@ -343,7 +343,7 @@ describe('TestEngine', () => {
 
     expect(executor.executeAction).not.toHaveBeenCalled();
     expect(page.goto).toHaveBeenCalledTimes(3);
-    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 3, pending: 0, percentage: 100 });
+    expect(result.coverage.actions).toEqual({ visited: 0, blocked: 3, pending: 0, percentage: 0, resolvedPercentage: 100 });
     const blocked = db.prepare('SELECT status, output_json FROM test_results').all() as Array<{ status: string; output_json: string }>;
     expect(blocked).toHaveLength(3);
     expect(blocked.every(item => item.status === 'skipped' && JSON.parse(item.output_json).reason.includes('页面不可访问'))).toBe(true);
@@ -361,7 +361,8 @@ describe('TestEngine', () => {
     }).run(page, [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
 
     expect(result.executedActions).toBe(1);
-    expect(result.coverage.actions).toEqual({ visited: 1, blocked: 2, pending: 0, percentage: 100 });
+    expect(result.coverage.actions).toMatchObject({ visited: 1, blocked: 2, pending: 0, resolvedPercentage: 100 });
+    expect(result.coverage.actions.percentage).toBeCloseTo(100 / 3);
     const statuses = db.prepare('SELECT status FROM test_results ORDER BY started_at').all() as Array<{ status: string }>;
     expect(statuses.filter(item => item.status === 'skipped')).toHaveLength(2);
     db.close();
@@ -385,7 +386,7 @@ describe('TestEngine', () => {
     expect(result.executedActions).toBe(6);
     expect(result.executedCombinations).toBe(0);
     expect(result.skippedCombinations).toBe(5);
-    expect(result.coverage.combinations).toEqual({ covered: 5, total: 5, percentage: 100 });
+    expect(result.coverage.combinations).toEqual({ covered: 0, blocked: 5, total: 5, percentage: 0, resolvedPercentage: 100 });
     const combinations = db.prepare("SELECT status FROM test_results WHERE test_type = 'combination-1way'").all() as Array<{ status: string }>;
     expect(combinations).toHaveLength(5);
     expect(combinations.every(item => item.status === 'skipped')).toBe(true);
@@ -496,6 +497,29 @@ describe('TestEngine', () => {
     expect(result.executedActions).toBe(3);
     expect((db.prepare("SELECT output_json FROM test_results WHERE test_type = 'click'").get() as any).output_json)
       .toContain('文本动作异常');
+    db.close();
+  });
+
+  it('达到运行期限时中止后续测试并保留待覆盖项目', () => {
+    const db = createDatabase();
+    const engine = createEngine(db, new MemoryManager(db), createExecutor(), {
+      deadlineAt: Date.now() - 1,
+    }) as any;
+    expect(() => engine.assertWithinDeadline()).toThrow('最大运行时长');
+    db.close();
+  });
+
+  it('质量证据缺省时按空数组执行规则', async () => {
+    const db = createDatabase();
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const observation = { ...createPage() } as any;
+    await engine.evaluateActionEvidence({
+      before: { components: [], url: 'https://example.com', loadingOverlayCount: 0 },
+      after: { components: [], url: 'https://example.com', loadingOverlayCount: 0 },
+      action: 'click', selector: '#button', pageUrl: 'https://example.com',
+    });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM bugs').get()).toEqual({ count: 2 });
+    expect(observation).toBeTruthy();
     db.close();
   });
 });

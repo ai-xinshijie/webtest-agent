@@ -10,17 +10,20 @@
     "test": "vitest run --coverage",
     "test:strict": "vitest run --coverage --coverage.thresholds.lines=100 --coverage.thresholds.branches=100 --coverage.thresholds.functions=100 --coverage.thresholds.statements=100",
     "test:watch": "vitest --coverage",
-    "lint": "pnpm -r --filter './packages/*' run lint",
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" --max-warnings=0",
     "clean": "pnpm -r --filter './packages/*' run clean"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vitest/coverage-v8": "^5.0.1",
     "@vitest/ui": "^5.0.1",
+    "eslint": "^10.11.0",
     "jsdom": "^30.1.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.70.0",
     "vitest": "^5.0.1"
   }
 }

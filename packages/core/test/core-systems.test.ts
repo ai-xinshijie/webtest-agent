@@ -94,12 +94,14 @@ describe('CoverageGuarantee', () => {
     tracker.recordCombination(['click', 'fill']);
     tracker.setExpectedPaths(2);
     tracker.recordPath(['a', 'b']);
+    tracker.markPathBlocked(['b', 'c']);
 
     const snapshot = tracker.snapshot();
     expect(tracker.isExhausted()).toBe(true);
-    expect(snapshot.actions).toEqual({ visited: 2, blocked: 1, pending: 0, percentage: 100 });
-    expect(snapshot.combinations).toEqual({ covered: 1, total: 2, percentage: 50 });
-    expect(snapshot.paths).toEqual({ covered: 1, total: 2, percentage: 50 });
+    expect(snapshot.actions).toMatchObject({ visited: 2, blocked: 1, pending: 0, resolvedPercentage: 100 });
+    expect(snapshot.actions.percentage).toBeCloseTo(200 / 3);
+    expect(snapshot.combinations).toEqual({ covered: 1, blocked: 0, total: 2, percentage: 50, resolvedPercentage: 50 });
+    expect(snapshot.paths).toEqual({ covered: 1, blocked: 1, total: 2, percentage: 50, resolvedPercentage: 100 });
   });
 
   it('空覆盖快照按 100% 处理', () => {
@@ -128,13 +130,16 @@ describe('CoverageGuarantee', () => {
     tracker.initializeActions([{ pageId: 'p', componentId: 'c', action: 'click' }]);
     tracker.recordCombination(['a']);
     tracker.recordCombination(['a']);
+    tracker.markCombinationBlocked(['b']);
+    tracker.markCombinationBlocked(['a']);
     tracker.recordPath(['a', 'b']);
     tracker.recordPath(['a', 'b']);
+    tracker.markPathBlocked(['a', 'b']);
     tracker.setExpectedCombinations(1);
     tracker.setExpectedPaths(1);
     expect(tracker.snapshot()).toMatchObject({
       actions: { visited: 1, pending: 0 },
-      combinations: { covered: 1 },
+      combinations: { covered: 1, blocked: 1 },
       paths: { covered: 1 },
     });
   });

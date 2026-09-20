@@ -34,6 +34,7 @@ interface RunRequestBody {
   parallel?: number;
   headless?: boolean;
   resume?: boolean;
+  maxDuration?: number;
 }
 
 /**
@@ -173,6 +174,7 @@ export async function startGuiServer(options: GuiServerOptions = {}): Promise<Gu
       phase: body.phase,
       parallel: body.parallel ?? target.strategy.parallel,
       headless: body.headless,
+      maxDuration: body.maxDuration,
     }).catch(error => {
       console.error(`测试会话执行失败：${sessionId}，${error instanceof Error ? error.message : error}`);
     });

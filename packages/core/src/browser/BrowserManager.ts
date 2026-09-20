@@ -1,5 +1,5 @@
 import { chromium, firefox, webkit, type Browser, type BrowserContext, type Page } from 'playwright';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 export type BrowserType = 'chromium' | 'firefox' | 'webkit';
@@ -46,6 +46,18 @@ export class BrowserManager {
     );
     if (!executablePath) {
       throw new Error(`未找到项目内置浏览器：${browserType}，请执行 wta install browsers`);
+    }
+    // Git 在 Windows 工作区无法保存 POSIX 可执行位。Linux 拉取内置浏览器后，
+    // 在启动前补齐权限，确保无头运行不依赖用户手工 chmod。
+    if (process.platform !== 'win32') {
+      try {
+        chmodSync(executablePath, 0o755);
+      } catch (error) {
+        throw new Error(
+          `无法赋予内置浏览器执行权限：${executablePath}。${error instanceof Error ? error.message : error}`,
+          { cause: error },
+        );
+      }
     }
 
     const launcher = browserType === 'chromium' ? chromium : browserType === 'firefox' ? firefox : webkit;

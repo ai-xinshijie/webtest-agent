@@ -1,5 +1,4 @@
 import type { Page } from 'playwright';
-import type { Component } from '../cognition/ComponentModel.js';
 import type { ExtractedComponent } from '../perception/types.js';
 import type { AgentLogger, AgentLogContext } from '../logger/AgentLogger.js';
 
@@ -126,15 +125,17 @@ export class InteractionExecutor {
         case 'select-first':
           await page.selectOption(selector, { index: 0 }, { timeout: 5000 });
           break;
-        case 'select-last':
+        case 'select-last': {
           const optionCount = await page.locator(selector).locator('option').count();
           await page.selectOption(selector, { index: Math.max(0, optionCount - 1) }, { timeout: 5000 });
           break;
-        case 'select-random':
+        }
+        case 'select-random': {
           const randomCount = await page.locator(selector).locator('option').count();
           const randomIndex = randomCount > 1 ? Math.floor(Math.random() * randomCount) : 0;
           await page.selectOption(selector, { index: randomIndex }, { timeout: 5000 });
           break;
+        }
         case 'collapse':
         case 'close-button':
           await page.click(selector, clickOptions);

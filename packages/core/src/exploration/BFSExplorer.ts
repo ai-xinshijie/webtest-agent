@@ -9,7 +9,9 @@ import type { ComponentRevealer } from './ComponentRevealer.js';
 export interface ExplorerOptions {
   maxPages: number;
   maxDepth: number;
+  includePaths?: string[];
   excludePaths: string[];
+  deadlineAt?: number;
 }
 
 export interface ExplorationResult {
@@ -31,7 +33,7 @@ export class BFSExplorer {
     private perceiver: { capture(page: Page): Promise<StructuredObservation> },
     private db: DatabaseManager,
     private targetId: string,
-    private options: ExplorerOptions = { maxPages: 50, maxDepth: 3, excludePaths: [] },
+    private options: ExplorerOptions = { maxPages: 50, maxDepth: 3, includePaths: [], excludePaths: [] },
     private logger?: AgentLogger,
     private revealer?: ComponentRevealer,
   ) {}
@@ -47,12 +49,13 @@ export class BFSExplorer {
     this.queue.push({ url: startUrl, depth: 0, trigger: 'start' });
 
     while (this.queue.length > 0 && result.pagesVisited < this.options.maxPages) {
+      this.assertWithinDeadline();
       const { url, depth, trigger } = this.queue.shift()!;
       const normalizedUrl = this.normalizeUrl(url);
 
       if (this.visitedUrls.has(normalizedUrl)) continue;
       this.visitedUrls.add(normalizedUrl);
-      if (this.options.excludePaths.some(path => normalizedUrl.includes(path))) continue;
+      if (!this.isInScope(normalizedUrl)) continue;
 
       try {
         const navigate = () => page.goto(url, {
@@ -141,7 +144,7 @@ export class BFSExplorer {
         const currentOrigin = new URL(observation.url).origin;
         const targetOrigin = new URL(absoluteUrl).origin;
         if (currentOrigin !== targetOrigin) continue;
-        if (this.options.excludePaths.some(path => normalizedTarget.includes(path))) continue;
+        if (!this.isInScope(normalizedTarget)) continue;
 
         const edge = { from: normalizedUrl, to: normalizedTarget, trigger: link.text || 'link' };
         result.navigationGraph.push(edge);
@@ -272,6 +275,18 @@ export class BFSExplorer {
       return `${parsed.origin}${parsed.pathname.replace(/\/$/, '')}`;
     } catch {
       return url;
+    }
+  }
+
+  private isInScope(normalizedUrl: string): boolean {
+    const includes = this.options.includePaths ?? [];
+    if (includes.length > 0 && !includes.some(path => normalizedUrl.includes(path))) return false;
+    return !this.options.excludePaths.some(path => normalizedUrl.includes(path));
+  }
+
+  private assertWithinDeadline(): void {
+    if (this.options.deadlineAt !== undefined && Date.now() >= this.options.deadlineAt) {
+      throw new Error('测试会话已达到最大运行时长，未探索页面保留为待发现');
     }
   }
 }

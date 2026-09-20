@@ -25,7 +25,7 @@ function validateState(filePath: string): void {
     }
   } catch (error) {
     const reason = String(error).replace(/^Error: /, '');
-    throw new Error('认证状态文件格式不正确：' + reason);
+    throw new Error('认证状态文件格式不正确：' + reason, { cause: error });
   }
 }
 

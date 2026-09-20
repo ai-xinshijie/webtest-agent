@@ -308,13 +308,18 @@ export class ReportGenerator {
 
     const actions = coverage.actions;
     const actionTotal = actions.visited + actions.blocked + actions.pending;
-    let markdown = '| 维度 | 已执行 | 受阻 | 待覆盖 | 总数 | 覆盖率 |\n|------|--------|------|--------|------|--------|\n';
-    markdown += `| 动作 | ${actions.visited} | ${actions.blocked} | ${actions.pending} | ${actionTotal} | ${Number(actions.percentage ?? 0).toFixed(2)}% |\n`;
+    const actionResolved = actions.resolvedPercentage ?? (actionTotal === 0
+      ? 100
+      : ((actions.visited + actions.blocked) / actionTotal) * 100);
+    let markdown = '| 维度 | 已执行 | 受阻 | 待覆盖 | 总数 | 实际覆盖率 | 已解析率 |\n|------|--------|------|--------|------|------------|----------|\n';
+    markdown += `| 动作 | ${actions.visited} | ${actions.blocked} | ${actions.pending} | ${actionTotal} | ${Number(actions.percentage ?? 0).toFixed(2)}% | ${Number(actionResolved).toFixed(2)}% |\n`;
 
     for (const [name, item] of [['组合', coverage.combinations], ['路径', coverage.paths]] as const) {
-      markdown += `| ${name} | ${item.covered} | 0 | ${Math.max(0, item.total - item.covered)} | ${item.total} | ${Number(item.percentage ?? 0).toFixed(2)}% |\n`;
+      const blocked = item.blocked ?? 0;
+      const resolved = item.resolvedPercentage ?? (item.total === 0 ? 100 : ((item.covered + blocked) / item.total) * 100);
+      markdown += `| ${name} | ${item.covered} | ${blocked} | ${Math.max(0, item.total - item.covered - blocked)} | ${item.total} | ${Number(item.percentage ?? 0).toFixed(2)}% | ${Number(resolved).toFixed(2)}% |\n`;
     }
-    return `${markdown}\n动作覆盖率将已执行和已确认受阻的动作计入已解析覆盖；受阻项保留在报告中，便于后续解除条件后重测。\n`;
+    return `${markdown}\n实际覆盖率只计入真正执行的项目；已解析率包含已确认受阻项目。受阻项保留在报告中，便于后续解除条件后重测。\n`;
   }
 
   private translateHotPatchStatus(status: string): string {

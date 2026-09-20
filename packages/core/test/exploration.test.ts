@@ -65,6 +65,7 @@ function createObservation(): StructuredObservation {
     dialogCount: 0,
     loadingOverlayCount: 0,
     networkEvents: [],
+    consoleEvents: [],
   };
 }
 
@@ -144,6 +145,15 @@ describe('BFSExplorer', () => {
     expect(explorer.normalizeUrl('非法地址')).toBe('非法地址');
     expect(explorer.resolveUrl('mailto:test@example.com', 'https://example.com')).toBeNull();
     expect(explorer.resolveUrl('bad:url', 'https://example.com')).toBe('bad:url');
+    expect(explorer.isInScope('https://example.com/included')).toBe(true);
+    const included = new BFSExplorer({ capture: vi.fn() }, database, 'target-1', {
+      maxPages: 1, maxDepth: 1, includePaths: ['/included'], excludePaths: ['/blocked'],
+    }) as any;
+    expect(included.isInScope('https://example.com/included')).toBe(true);
+    expect(included.isInScope('https://example.com/other')).toBe(false);
+    expect(included.isInScope('https://example.com/included/blocked')).toBe(false);
+    included.options.deadlineAt = Date.now() - 1;
+    expect(() => included.assertWithinDeadline()).toThrow('最大运行时长');
   });
 
   it('跳过已访问和排除页面，并以可读文本记录非 Error 导航失败', async () => {
@@ -260,6 +270,43 @@ describe('StructuredPerceiver', () => {
     expect(result.forms).toHaveLength(1);
     expect(result.dialogCount).toBe(1);
     expect(result.networkEvents).toEqual([]);
+    expect(result.consoleEvents).toEqual([]);
+  });
+
+  it('持续收集并清空网络与控制台证据', () => {
+    const handlers = new Map<string, (value: any) => void>();
+    const page = {
+      on: vi.fn((name: string, handler: (value: any) => void) => handlers.set(name, handler)),
+    } as unknown as Page;
+    const perceiver = new StructuredPerceiver();
+    perceiver.observe(page);
+    perceiver.observe(page);
+    expect((page.on as any)).toHaveBeenCalledTimes(4);
+
+    handlers.get('request')!({ url: () => 'https://example.com/api', method: () => 'POST', resourceType: () => 'xhr' });
+    handlers.get('response')!({
+      url: () => 'https://example.com/api', status: () => 500,
+      request: () => ({ method: () => 'POST', resourceType: () => 'xhr' }),
+    });
+    handlers.get('console')!({ type: () => 'error', text: () => '脚本错误' });
+    handlers.get('console')!({ type: () => 'log', text: () => '普通日志' });
+    handlers.get('pageerror')!(new Error('未捕获异常'));
+
+    expect(perceiver.drainEvidence(page)).toEqual({
+      networkEvents: [
+        { url: 'https://example.com/api', method: 'POST', resourceType: 'xhr' },
+        { url: 'https://example.com/api', method: 'POST', status: 500, resourceType: 'xhr' },
+      ],
+      consoleEvents: ['error: 脚本错误', 'pageerror: 未捕获异常'],
+    });
+    expect(perceiver.drainEvidence(page)).toEqual({ networkEvents: [], consoleEvents: [] });
+  });
+
+  it('缺少事件接口的页面仍能生成空证据', () => {
+    const perceiver = new StructuredPerceiver();
+    const page = {} as Page;
+    perceiver.observe(page);
+    expect(perceiver.drainEvidence(page)).toEqual({ networkEvents: [], consoleEvents: [] });
   });
 
   it('按需捕获视觉截图', async () => {

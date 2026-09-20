@@ -93,7 +93,7 @@ describe('ReportGenerator', () => {
     expect(report).toContain('按钮：1 个');
     expect(report).toContain('### 深度覆盖');
     expect(report).toContain('| 动作 | 3 | 1 | 0 | 4 | 75.00% |');
-    expect(report).toContain('已确认受阻的动作计入已解析覆盖');
+    expect(report).toContain('实际覆盖率只计入真正执行的项目');
     expect(report).toContain('## 代码自愈');
     expect(report).toContain('登录异常');
   });

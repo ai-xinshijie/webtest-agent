@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import type { StructuredObservation, ExtractedComponent } from './types.js';
+import type { StructuredObservation, ExtractedComponent, NetworkEvent } from './types.js';
 
 /**
  * Custom extraction script executed in browser context.
@@ -100,10 +100,12 @@ const EXTRACTION_SCRIPT = `(() => {
         if (el.dataset?.testid) return '[data-testid="' + el.dataset.testid + '"]';
         if (el.id) return '#' + CSS.escape(el.id);
         if (el.getAttribute('aria-label')) {
-          return el.tagName.toLowerCase() + '[aria-label="' + el.getAttribute('aria-label') + '"]';
+          const selector = el.tagName.toLowerCase() + '[aria-label="' + el.getAttribute('aria-label') + '"]';
+          if (document.querySelectorAll(selector).length === 1) return selector;
         }
         if (el.getAttribute('role')) {
-          return '[role="' + el.getAttribute('role') + '"]';
+          const selector = '[role="' + el.getAttribute('role') + '"]';
+          if (document.querySelectorAll(selector).length === 1) return selector;
         }
         // Text-based selector for links and buttons
         const text = el.textContent?.trim().slice(0, 50);
@@ -115,7 +117,21 @@ const EXTRACTION_SCRIPT = `(() => {
         const uniqueClass = Array.from(el.classList).find(c =>
           document.querySelectorAll('.' + CSS.escape(c)).length === 1);
         if (uniqueClass) return '.' + CSS.escape(uniqueClass);
-        return null;
+        // 相同 role、文本或 class 在业务列表中通常会重复。使用从 body 开始的
+        // nth-of-type 路径保留元素实例身份，避免后续测试只命中首个控件。
+        const path = [];
+        let current = el;
+        while (current && current !== document.body && path.length < 8) {
+          let index = 1;
+          let sibling = current.previousElementSibling;
+          while (sibling) {
+            if (sibling.tagName === current.tagName) index++;
+            sibling = sibling.previousElementSibling;
+          }
+          path.unshift(current.tagName.toLowerCase() + ':nth-of-type(' + index + ')');
+          current = current.parentElement;
+        }
+        return 'body > ' + path.join(' > ');
       })(),
     });
   });
@@ -137,11 +153,53 @@ const EXTRACTION_SCRIPT = `(() => {
 })()`;
 
 export class StructuredPerceiver {
+  private events = new WeakMap<Page, { network: NetworkEvent[]; console: string[] }>();
+
+  /** 注册一次 Playwright 事件监听；读取观察时会返回并清空上一动作的证据。 */
+  observe(page: Page): void {
+    if (this.events.has(page)) return;
+    const state = { network: [] as NetworkEvent[], console: [] as string[] };
+    this.events.set(page, state);
+    if (typeof page.on !== 'function') return;
+    page.on('request', request => {
+      state.network.push({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
+    });
+    page.on('response', response => {
+      const request = response.request();
+      state.network.push({
+        url: response.url(),
+        method: request.method(),
+        status: response.status(),
+        resourceType: request.resourceType(),
+      });
+    });
+    page.on('console', message => {
+      if (message.type() === 'error' || message.type() === 'warning') {
+        state.console.push(`${message.type()}: ${message.text()}`);
+      }
+    });
+    page.on('pageerror', error => state.console.push(`pageerror: ${error.message}`));
+  }
+
+  drainEvidence(page: Page): { networkEvents: NetworkEvent[]; consoleEvents: string[] } {
+    this.observe(page);
+    const state = this.events.get(page)!;
+    const evidence = { networkEvents: state.network, consoleEvents: state.console };
+    state.network = [];
+    state.console = [];
+    return evidence;
+  }
+
   /**
    * Capture structured observation from page using custom extraction script.
    * This is the primary perception channel (DOM + CSS states + clickability).
    */
   async capture(page: Page): Promise<StructuredObservation> {
+    this.observe(page);
     const [extracted, url] = await Promise.all([
       page.evaluate(EXTRACTION_SCRIPT) as Promise<{
         components: ExtractedComponent[];
@@ -154,7 +212,7 @@ export class StructuredPerceiver {
       Promise.resolve(page.url()),
     ]);
 
-    const networkEvents = await this.captureNetworkEvents(page);
+    const { networkEvents, consoleEvents } = this.drainEvidence(page);
 
     return {
       type: 'structured',
@@ -166,6 +224,7 @@ export class StructuredPerceiver {
       dialogCount: extracted.dialogs,
       loadingOverlayCount: extracted.loadingOverlays,
       networkEvents,
+      consoleEvents,
     };
   }
 
@@ -181,17 +240,4 @@ export class StructuredPerceiver {
     return buffer.toString('base64');
   }
 
-  /**
-   * Capture network events from page.
-   */
-  private async captureNetworkEvents(page: Page): Promise<Array<{
-    url: string;
-    method: string;
-    status?: number;
-    resourceType: string;
-  }>> {
-    // Note: Network events are captured via page.on('request'/'response') listeners
-    // set up by NetworkMonitor. This is a simplified version for observation.
-    return [];
-  }
 }

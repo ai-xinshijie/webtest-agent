@@ -15,6 +15,7 @@ import {
   type CoverageSnapshot,
 } from '../coverage/CoverageGuarantee.js';
 import { NetworkFaultInjector } from '../testing/NetworkFaultInjector.js';
+import { BUILTIN_RULES, type RuleContext } from '../cognition/QualityRule.js';
 
 interface PageRow {
   id: string;
@@ -40,6 +41,7 @@ export interface TestEngineOptions {
   phase?: 'explore' | 'test' | 'combo' | 'chaos';
   enablePaths?: boolean;
   enableChaos?: boolean;
+  deadlineAt?: number;
 }
 
 export interface TestEngineResult {
@@ -111,11 +113,17 @@ export class TestEngine {
 
     const phase = this.options.phase;
     if (!phase || phase === 'test' || phase === 'combo') {
-      for (const pageRow of pages) await this.testPageActions(page, pageRow);
+      for (const pageRow of pages) {
+        this.assertWithinDeadline();
+        await this.testPageActions(page, pageRow);
+      }
     }
 
     if (!phase || phase === 'combo') {
-      for (const pageRow of pages) await this.testPageCombinations(page, pageRow);
+      for (const pageRow of pages) {
+        this.assertWithinDeadline();
+        await this.testPageCombinations(page, pageRow);
+      }
     }
 
     if ((!phase || phase === 'combo') && this.options.enablePaths !== false) {
@@ -149,6 +157,7 @@ export class TestEngine {
     for (const row of components) {
       const component = this.toExtracted(row);
       for (const action of this.getActions(row.type)) {
+        this.assertWithinDeadline();
         const itemKey = `${this.options.targetId}:${row.id}:${action}`;
         const unavailableReason = this.getUnavailableReason(component);
         if (unavailableReason) {
@@ -204,6 +213,13 @@ export class TestEngine {
           });
           this.tracker.markVisited(row.page_id, row.id, action);
           this.executedActions++;
+          await this.evaluateActionEvidence({
+            before,
+            after,
+            action,
+            selector: row.selector,
+            pageUrl: pageRow.url_pattern,
+          });
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           this.persistResult({
@@ -262,6 +278,7 @@ export class TestEngine {
     this.tracker.setExpectedCombinations(result.rows.length);
 
     for (const rowValues of result.rows) {
+      this.assertWithinDeadline();
       const itemKey = [
         'combination',
         pageRow.id,
@@ -338,6 +355,7 @@ export class TestEngine {
     this.tracker.setExpectedPaths(paths.length);
 
     for (const path of paths) {
+      this.assertWithinDeadline();
       const itemKey = `path:${path.join('>')}`;
       const startedAt = Date.now();
       if (this.shouldSkip(itemKey)) {
@@ -400,6 +418,7 @@ export class TestEngine {
     ];
 
     for (const fault of faults) {
+      this.assertWithinDeadline();
       const startedAt = Date.now();
       await this.injector.apply(page, fault);
       try {
@@ -425,6 +444,7 @@ export class TestEngine {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      this.assertWithinDeadline();
       try {
         await this.logger.runScript(
           {
@@ -454,6 +474,58 @@ export class TestEngine {
       SELECT id, page_id, type, selector, label, state_json, constraints_json
       FROM components WHERE page_id = ?
     `).all(pageId) as unknown as ComponentRow[];
+  }
+
+  private assertWithinDeadline(): void {
+    if (this.options.deadlineAt !== undefined && Date.now() >= this.options.deadlineAt) {
+      throw new Error('测试会话已达到最大运行时长，未执行项目保留为待覆盖');
+    }
+  }
+
+  private async evaluateActionEvidence(input: {
+    before: import('../perception/types.js').StructuredObservation;
+    after: import('../perception/types.js').StructuredObservation;
+    action: string;
+    selector: string;
+    pageUrl: string;
+  }): Promise<void> {
+    const context: RuleContext = {
+      before: input.before,
+      after: input.after,
+      action: { type: input.action, target: input.selector },
+      networkLog: input.after.networkEvents ?? [],
+      consoleLog: input.after.consoleEvents ?? [],
+      componentModel: null,
+      memory: this.memory.getTargetMemory(this.options.targetId),
+    };
+
+    for (const rule of BUILTIN_RULES) {
+      if (rule.id === 'QR002' && !input.action.startsWith('submit')) continue;
+      const result = await this.logger.runScript(
+        { description: `执行动作质量规则：${rule.name}`, module: 'TestEngine', method: 'evaluateActionEvidence' },
+        { type: 'quality-rule', target: rule.id, params: { action: input.action, selector: input.selector } },
+        () => rule.check(context),
+        { pageUrl: input.pageUrl, phase: 'test' },
+      );
+      if (!result.violation) continue;
+      this.db.prepare(`
+        INSERT INTO bugs
+          (id, session_id, target_id, severity, title, description, page_url, rule_id, component_id, evidence_json, detected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        this.options.sessionId,
+        this.options.targetId,
+        result.violation.severity,
+        result.violation.description.slice(0, 100),
+        result.violation.description,
+        input.pageUrl,
+        result.violation.ruleId,
+        null,
+        JSON.stringify(result.violation.evidence),
+        Date.now(),
+      );
+    }
   }
 
   private getActions(type: string): string[] {
@@ -501,7 +573,7 @@ export class TestEngine {
   ): void {
     const reason = `页面不可访问，已阻断组合测试：${error instanceof Error ? error.message : String(error)}`;
     for (const rowValues of rows) {
-      this.tracker.recordCombination(rowValues);
+      this.tracker.markCombinationBlocked(rowValues);
       this.persistResult({
         componentId: components[0]!.id,
         testType: `combination-${strength}way`,

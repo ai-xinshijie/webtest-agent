@@ -63,7 +63,7 @@ async function runForeground() {
   });
 
   try {
-    await command.parseAsync(['demo', '--foreground', '--mode', 'expand', '--phase', 'test', '--parallel', '3', '--headed'], {
+    await command.parseAsync(['demo', '--foreground', '--mode', 'expand', '--phase', 'test', '--parallel', '3', '--headed', '--max-time', '1.5h'], {
       from: 'user',
     });
     return { logs, exitCodes };
@@ -105,6 +105,7 @@ describe('前台运行命令', () => {
         parallel: 3,
         headless: false,
         resumeSessionId: undefined,
+        maxDuration: 5400,
       }),
     );
     expect(result.logs.join('\n')).toContain('会话完成：session-1');
@@ -137,5 +138,41 @@ describe('前台运行命令', () => {
     expect(result.logs.join('\n')).toContain('状态：failed');
     expect(result.logs.join('\n')).toContain('报告：未生成');
     expect(result.exitCodes).toEqual([1]);
+  });
+
+  it('拒绝非法或非正数的最大运行时长', async () => {
+    mkdirSync(path.join(tempDir, '.wta', 'targets'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'targets', 'demo.json'), JSON.stringify({
+      name: 'demo', url: 'https://example.com', credentials: { username: 'u', password: 'p' },
+      strategy: { runMode: 'continue', depth: 'quick', maxDuration: 60, maxPages: 1, parallel: 1, screenshot: 'never', video: false, headless: true },
+      scope: { includePaths: [], excludePaths: [] },
+    }), 'utf-8');
+    const command = await loadRunCommand();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    await command.parseAsync(['demo', '--foreground', '--max-time', 'bad'], { from: 'user' });
+    await command.parseAsync(['demo', '--foreground', '--max-time', '0s'], { from: 'user' });
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('无效最大运行时长'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('必须大于 0'));
+    errorSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  it('接受分钟和默认秒单位的最大运行时长', async () => {
+    mkdirSync(path.join(tempDir, '.wta', 'targets'), { recursive: true });
+    writeFileSync(path.join(tempDir, '.wta', 'targets', 'demo.json'), JSON.stringify({
+      name: 'demo', url: 'https://example.com', credentials: { username: 'u', password: 'p' },
+      strategy: { runMode: 'continue', depth: 'quick', maxDuration: 60, maxPages: 1, parallel: 1, screenshot: 'never', video: false, headless: true },
+      scope: { includePaths: [], excludePaths: [] },
+    }), 'utf-8');
+    const core = await import('@wta/core') as any;
+    const command = await loadRunCommand();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    await command.parseAsync(['demo', '--foreground', '--max-time', '2m'], { from: 'user' });
+    expect(core.MockOrchestrator.instances.at(-1).run).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ maxDuration: 120 }));
+    const secondsCommand = await loadRunCommand();
+    await secondsCommand.parseAsync(['demo', '--foreground', '--max-time', '42'], { from: 'user' });
+    expect(core.MockOrchestrator.instances.at(-1).run).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ maxDuration: 42 }));
+    exitSpy.mockRestore();
   });
 });

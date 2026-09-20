@@ -30,11 +30,11 @@ export class AgentSelfHealer {
     }
   }
 
-  private async handle(
+  private async handle<T>(
     error: unknown,
     ctx: { operationName: string; sessionId: string },
-    retry: Function,
-  ): Promise<any> {
+    retry: () => Promise<T>,
+  ): Promise<T | { skipped: true; reason: string }> {
     const err = error instanceof Error ? error : new Error(String(error));
     const classification = this.classify(err);
 
@@ -66,7 +66,7 @@ export class AgentSelfHealer {
     return 'fatal';
   }
 
-  private async retryWithBackoff(fn: Function, maxRetries: number, delays: number[]): Promise<any> {
+  private async retryWithBackoff<T>(fn: () => Promise<T>, maxRetries: number, delays: number[]): Promise<T> {
     for (let i = 0; i < maxRetries; i++) {
       await new Promise(resolve => setTimeout(resolve, delays[i] ?? 5000));
       try {
@@ -75,6 +75,7 @@ export class AgentSelfHealer {
         if (i === maxRetries - 1) throw error;
       }
     }
+    return fn();
   }
 }
 
