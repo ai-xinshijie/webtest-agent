@@ -16,8 +16,11 @@ import { ConfigManager, DatabaseManager, MemoryManager } from '@wta/core';
 
 let tempDir = '';
 let originalCwd = '';
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
 
 beforeEach(() => {
+  // 本文件验证通用命令流程；Linux 系统依赖安装由 install-cli.test.ts 中的隔离 mock 用例覆盖。
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   originalCwd = process.cwd();
   tempDir = mkdtempSync(path.join(tmpdir(), 'wta-cli-'));
   process.chdir(tempDir);
@@ -25,6 +28,7 @@ beforeEach(() => {
 
 afterEach(() => {
   process.chdir(originalCwd);
+  Object.defineProperty(process, 'platform', platformDescriptor);
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = '';
 });
