@@ -645,4 +645,272 @@ describe('TestEngine', () => {
     expect(engine.pageFingerprints.has('page-1')).toBe(false);
     db.close();
   });
+
+  it('模型决策门返回合法候选时，测试引擎提升该候选动作', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'button-1', 'page-1', 'button', '#button-1');
+    addComponent(db, 'button-2', 'page-1', 'link', '#button-2');
+    const order: string[] = [];
+    const executor = { executeAction: vi.fn(async (_page: Page, component: any, action: string) => { order.push(component.selector + ':' + action); }) } as unknown as InteractionExecutor;
+    const engine = createEngine(db, new MemoryManager(db), executor, { runMode: 'fresh', phase: 'test', enableChaos: false }) as any;
+    engine.navigate = vi.fn().mockResolvedValue(undefined);
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('fingerprint');
+    engine.perceiver.capture = vi.fn().mockResolvedValue({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] });
+    engine.decisionGate.selectNext = vi.fn().mockResolvedValue({ candidateId: 'button-2:click', reason: '先验证链接动作', expectedState: '进入目标页面' });
+    await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+    expect(order.slice(0, 2)).toEqual(['#button-1:click', '#button-2:click']);
+    expect(engine.decisionGate.selectNext).toHaveBeenCalled();
+    db.close();
+  });
+
+  it('页面变化后将新出现的受控控件交给模型选择，并在当前状态执行', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'button-1', 'page-1', 'button', '#button-1');
+    const order: string[] = [];
+    const executor = {
+      executeAction: vi.fn(async (_page: Page, component: any, action: string) => {
+        order.push(component.selector + ':' + action);
+      }),
+    } as unknown as InteractionExecutor;
+    const engine = createEngine(db, new MemoryManager(db), executor, {
+      runMode: 'fresh', phase: 'test', enableChaos: false,
+    }) as any;
+    const component = (selector: string, text: string) => ({
+      tag: 'button', role: 'button', text, classes: [], ariaLabel: null, placeholder: null, selector,
+      rect: { x: 0, y: 0, w: 20, h: 10 },
+      state: { visible: true, enabled: true, inViewport: true, cursorPointer: true, userSelectNone: false },
+      clickability: { score: 1, isInteractive: true, isHighConfidence: true, signals: { isSemanticTag: true, hasAriaRole: true, cursorPointer: true, hasOnclick: false, hasTabIndex: false } },
+    });
+    const baseline = { type: 'structured' as const, timestamp: 1, url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [], components: [component('#button-1', '打开弹窗')] };
+    const dialog = { ...baseline, dialogCount: 1, components: [...baseline.components, component('#confirm', '确认')] };
+    engine.navigate = vi.fn().mockResolvedValue(undefined);
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('fingerprint');
+    engine.perceiver.capture = vi.fn()
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValueOnce(dialog)
+      .mockResolvedValue(dialog);
+    engine.decisionGate.selectNext = vi.fn().mockImplementation(async (input: any) =>
+      input.candidates.find((candidate: any) => candidate.id.startsWith('dynamic-'))
+        ? { candidateId: input.candidates.find((candidate: any) => candidate.id.startsWith('dynamic-')).id, reason: '确认弹窗状态', expectedState: '完成弹窗确认' }
+        : null);
+
+    await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }]);
+
+    expect(order.slice(0, 2)).toEqual(['#button-1:click', '#confirm:click']);
+    expect(db.prepare("SELECT input_json FROM test_results WHERE component_id LIKE 'dynamic-%'").get()).toMatchObject({
+      input_json: expect.stringContaining('模型选择当前状态候选'),
+    });
+    db.close();
+  });
+
+  it('动态候选忽略字段不完整、页面外壳和既有基础控件', () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'button-1', 'page-1', 'button', '#existing');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const complete = {
+      tag: 'button', role: 'button', text: '新增', classes: [], ariaLabel: null, placeholder: null, selector: '#new',
+      rect: { x: 0, y: 0, w: 10, h: 10 },
+      state: { visible: true, enabled: true, inViewport: true, cursorPointer: true, userSelectNone: false },
+      clickability: { score: 1, isInteractive: true, isHighConfidence: true, signals: { isSemanticTag: true, hasAriaRole: true, cursorPointer: true, hasOnclick: false, hasTabIndex: false } },
+    };
+    const before = { components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] };
+    const after = { ...before, components: [
+      { ...complete, selector: '#existing' },
+      { ...complete, selector: '#shell', classes: ['sidebar'] },
+      { selector: '#incomplete', tag: 'button' },
+      { ...complete, selector: '#new' },
+    ] };
+    const result = engine.dynamicActionsFromObservation({ id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, before, after, []);
+    expect(result.map((item: any) => item.row.selector)).toEqual(['#new', '#new', '#new']);
+    db.close();
+  });
+
+  it('动态候选按动作去重，并在达到受控上限后停止扩展', () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const component = (selector: string) => ({
+      tag: 'button', role: 'button', text: selector, classes: [], ariaLabel: null, placeholder: null, selector,
+      rect: { x: 0, y: 0, w: 10, h: 10 },
+      state: { visible: true, enabled: true, inViewport: true, cursorPointer: true, userSelectNone: false },
+      clickability: { score: 1, isInteractive: true, isHighConfidence: true, signals: { isSemanticTag: true, hasAriaRole: true, cursorPointer: true, hasOnclick: false, hasTabIndex: false } },
+    });
+    const before = { components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] };
+    const page = { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' };
+    const repeated = engine.dynamicActionsFromObservation(page, before, { ...before, components: [component('#new'), component('#new')] }, []);
+    const pending = [repeated[0]];
+    const withoutPendingDuplicate = engine.dynamicActionsFromObservation(page, before, { ...before, components: [component('#new')] }, pending);
+    const capped = engine.dynamicActionsFromObservation(page, before, { ...before, components: Array.from({ length: 5 }, (_, index) => component(`#new-${index}`)) }, []);
+
+    expect(repeated).toHaveLength(3);
+    expect(withoutPendingDuplicate.map((item: any) => item.action)).not.toContain(repeated[0].action);
+    expect(capped).toHaveLength(12);
+    db.close();
+  });
+
+  it('动态候选按 aria、占位文本和选择器回退生成标签', () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const component = (selector: string, ariaLabel: string | null, placeholder: string | null) => ({
+      tag: 'button', role: 'button', text: null, classes: [], ariaLabel, placeholder, selector,
+      rect: { x: 0, y: 0, w: 10, h: 10 },
+      state: { visible: true, enabled: true, inViewport: true, cursorPointer: true, userSelectNone: false },
+      clickability: { score: 1, isInteractive: true, isHighConfidence: true, signals: { isSemanticTag: true, hasAriaRole: true, cursorPointer: true, hasOnclick: false, hasTabIndex: false } },
+    });
+    const before = { components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] };
+    const result = engine.dynamicActionsFromObservation(
+      { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' },
+      before,
+      { ...before, components: [component('#aria', '辅助标签', null), component('#placeholder', null, '占位标签'), component('#selector', null, null)] },
+      [],
+    );
+
+    expect(result.map((item: any) => item.row.label)).toEqual(expect.arrayContaining(['辅助标签', '占位标签', '#selector']));
+    db.close();
+  });
+
+  it('模型选择的动态候选不可达或执行失败时分别记录跳过和失败', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const page = createPage();
+    const item = {
+      row: { id: 'dynamic-x', page_id: 'page-1', type: 'button', selector: '#dynamic', label: '动态按钮', state_json: JSON.stringify({ visible: true, enabled: true }), constraints_json: null },
+      action: 'click', source: 'model', modelReason: '处理弹窗', expectedState: '弹窗关闭', currentState: true,
+    };
+    engine.reachability.resolve = vi.fn().mockResolvedValueOnce({ reachable: false, status: 'temporarily-blocked', reason: '被遮挡', attempts: ['探测'] })
+      .mockResolvedValueOnce({ reachable: true, status: 'ready', attempts: ['通过'] });
+    await engine.executeDynamicAction(page, { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, item, {
+      ...({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 1, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] }),
+    });
+    engine.executor.executeAction = vi.fn().mockRejectedValue('动态动作异常');
+    await engine.executeDynamicAction(page, { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, item, {
+      ...({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 1, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] }),
+    });
+    expect(db.prepare("SELECT status FROM test_results WHERE component_id = 'dynamic-x' ORDER BY started_at").all()).toEqual([{ status: 'skipped' }, { status: 'failed' }]);
+    db.close();
+  });
+
+  it('动态动作和页面复位接受非 Error 异常并记录失败', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const page = createPage();
+    const item = {
+      row: { id: 'dynamic-text', page_id: 'page-1', type: 'button', selector: '#dynamic-text', label: '动态按钮', state_json: JSON.stringify({ visible: true, enabled: true }), constraints_json: null },
+      action: 'click', source: 'model', modelReason: '验证异常路径', expectedState: '保留测试记录', currentState: true,
+    };
+    engine.reachability.resolve = vi.fn().mockResolvedValue({ reachable: true, status: 'ready', attempts: ['通过'] });
+    engine.executor.executeAction = vi.fn().mockRejectedValue({ reason: '浏览器上下文已关闭' });
+    await engine.executeDynamicAction(page, { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, item, {
+      components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [],
+    });
+    engine.navigate = vi.fn().mockRejectedValue({ reason: '页面复位失败' });
+    await expect(engine.resetAfterModelAction(page, { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, [])).resolves.toBe(false);
+
+    expect(db.prepare("SELECT output_json FROM test_results WHERE component_id = 'dynamic-text'").get()).toMatchObject({
+      output_json: expect.stringContaining('[object Object]'),
+    });
+    db.close();
+  });
+
+  it('动态动作异常为 Error 时记录错误消息', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor()) as any;
+    const item = {
+      row: { id: 'dynamic-error', page_id: 'page-1', type: 'button', selector: '#dynamic-error', label: '动态按钮', state_json: JSON.stringify({ visible: true, enabled: true }), constraints_json: null },
+      action: 'click', source: 'model', modelReason: '验证错误分支', expectedState: '记录错误', currentState: true,
+    };
+    engine.reachability.resolve = vi.fn().mockResolvedValue({ reachable: true, status: 'ready', attempts: ['通过'] });
+    engine.executor.executeAction = vi.fn().mockRejectedValue(new Error('动态动作 Error 异常'));
+
+    await engine.executeDynamicAction(createPage(), { id: 'page-1', url_pattern: 'https://example.com/page', title: '页面' }, item, {
+      components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [],
+    });
+
+    expect(db.prepare("SELECT output_json FROM test_results WHERE component_id = 'dynamic-error'").get()).toMatchObject({
+      output_json: expect.stringContaining('动态动作 Error 异常'),
+    });
+    db.close();
+  });
+
+  it('模型优先级动作可跳过、失败，并在页面复位失败时停止页面队列', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'first', 'page-1', 'button', '#first');
+    addComponent(db, 'second', 'page-1', 'button', '#second');
+    const engine = createEngine(db, new MemoryManager(db), createExecutor(), { runMode: 'fresh', phase: 'test', enableChaos: false }) as any;
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('fingerprint');
+    engine.perceiver.capture = vi.fn().mockResolvedValue({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] });
+    engine.decisionGate.selectNext = vi.fn().mockResolvedValue({ candidateId: 'second:click', reason: '先处理第二项', expectedState: '第二项已验证' });
+    engine.reachability.resolve = vi.fn()
+      .mockResolvedValueOnce({ reachable: true, status: 'ready', attempts: ['通过'] })
+      .mockResolvedValueOnce({ reachable: false, status: 'blocked', reason: '被遮挡', attempts: ['探测'] });
+    engine.navigate = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('基线页不可达'));
+
+    await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: null }]);
+
+    expect(db.prepare("SELECT status, input_json FROM test_results WHERE component_id = 'second'").get()).toMatchObject({
+      status: 'skipped', input_json: expect.stringContaining('模型优先级'),
+    });
+    expect(engine.navigate).toHaveBeenCalledTimes(3);
+    db.close();
+  });
+
+  it('模型优先级动作失败时以 Error 消息持久化结果', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'first', 'page-1', 'button', '#first');
+    addComponent(db, 'second', 'page-1', 'button', '#second');
+    const executor = createExecutor();
+    const engine = createEngine(db, new MemoryManager(db), executor, { runMode: 'fresh', phase: 'test', enableChaos: false }) as any;
+    engine.navigate = vi.fn().mockResolvedValue(undefined);
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('fingerprint');
+    engine.perceiver.capture = vi.fn().mockResolvedValue({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] });
+    engine.decisionGate.selectNext = vi.fn().mockResolvedValue({ candidateId: 'second:click', reason: '模型排序', expectedState: '失败被记录' });
+    engine.executor.executeAction = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('模型优先级动作失败'));
+
+    await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: null }]);
+
+    expect(db.prepare("SELECT output_json, input_json FROM test_results WHERE component_id = 'second'").get()).toMatchObject({
+      output_json: expect.stringContaining('模型优先级动作失败'), input_json: expect.stringContaining('模型优先级'),
+    });
+    expect((engine.toDecisionCandidates([{ row: { id: 'empty-label', selector: '#fallback', label: null }, action: 'click' }])[0] as any).label).toContain('#fallback');
+    db.close();
+  });
+
+  it('模型决策上下文中缺少标签时回退到选择器', async () => {
+    const db = createDatabase();
+    addPage(db, 'page-1', 'https://example.com/page');
+    addComponent(db, 'untitled', 'page-1', 'button', '#untitled');
+    db.prepare("UPDATE components SET label = NULL WHERE id = 'untitled'").run();
+    const engine = createEngine(db, new MemoryManager(db), createExecutor(), { runMode: 'fresh', phase: 'test', enableChaos: false }) as any;
+    engine.navigate = vi.fn().mockResolvedValue(undefined);
+    engine.capturePageFingerprint = vi.fn().mockResolvedValue('fingerprint');
+    engine.perceiver.capture = vi.fn().mockResolvedValue({ components: [], url: 'https://example.com/page', title: '页面', forms: [], dialogCount: 0, loadingOverlayCount: 0, networkEvents: [], consoleEvents: [] });
+    const selectNext = vi.spyOn(engine.decisionGate, 'selectNext');
+
+    await engine.run(createPage(), [{ id: 'page-1', url_pattern: 'https://example.com/page', title: null }]);
+
+    expect(selectNext).toHaveBeenCalledWith(expect.objectContaining({
+      executedAction: expect.objectContaining({ label: '#untitled' }),
+    }));
+    db.close();
+  });
+
+  it('按测试深度配置视觉模型单页决策上限', () => {
+    const db = createDatabase();
+    expect((createEngine(db, new MemoryManager(db), createExecutor(), { depth: 'quick' }) as any).decisionGate.maxDecisions).toBe(1);
+    expect((createEngine(db, new MemoryManager(db), createExecutor(), { depth: 'standard' }) as any).decisionGate.maxDecisions).toBe(3);
+    expect((createEngine(db, new MemoryManager(db), createExecutor(), { depth: 'deep' }) as any).decisionGate.maxDecisions).toBe(6);
+    db.close();
+  });
+
 });

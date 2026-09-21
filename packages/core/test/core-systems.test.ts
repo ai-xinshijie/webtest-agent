@@ -580,6 +580,90 @@ describe('ComponentRevealer', () => {
     await revealer.reveal(page, { phase: 'explore' });
     expect(logger.runScript).toHaveBeenCalled();
   });
+
+  it('关闭临时层会跳过失效关闭按钮，揭示失败也继续后续候选并记录警告', async () => {
+    const database = new DatabaseManager(path.join(tempDir, 'reveal-warning.db'));
+    database.prepare("INSERT INTO targets (id, name, url, config_json, created_at, updated_at) VALUES ('demo', '演示系统', 'https://example.com', '{}', 1, 1)").run();
+    database.prepare("INSERT INTO sessions (id, target_id, status, started_at) VALUES ('session-1', 'demo', 'running', 1)").run();
+    const logger = new AgentLogger(database, 'session-1', { consoleOutput: false });
+    const failedClose = { click: vi.fn().mockRejectedValue(new Error('遮罩拦截')) };
+    const workingClose = { click: vi.fn().mockResolvedValue(undefined) };
+    const failedReveal = { click: vi.fn().mockRejectedValue('已失效'), hover: vi.fn().mockRejectedValue('已失效') };
+    const workingReveal = { click: vi.fn().mockResolvedValue(undefined), hover: vi.fn().mockResolvedValue(undefined) };
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn().mockResolvedValue({ components: [], title: '页面', forms: [], dialogs: 0, loadingOverlays: 0 }),
+      locator: vi.fn((selector: string) => ({
+        all: async () => selector === '.semi-modal-wrap button' ? [failedClose, workingClose]
+          : selector.includes('aria-haspopup') ? [failedReveal, workingReveal] : [],
+      })),
+      keyboard: { press: vi.fn().mockResolvedValue(undefined) },
+      mouse: { click: vi.fn().mockResolvedValue(undefined) },
+      waitForTimeout: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Page;
+
+    await expect(new ComponentRevealer(logger).reveal(page, { phase: 'explore' })).resolves.toMatchObject({ interactions: 2 });
+    expect(failedClose.click).toHaveBeenCalled();
+    expect(workingClose.click).toHaveBeenCalled();
+    expect(workingReveal.click).toHaveBeenCalled();
+    expect(logger.getTimeline().some(log => log.action.type === 'reveal-skip' && log.result.status === 'warning')).toBe(true);
+    database.close();
+  });
+
+  it('组件揭示失败为文本异常时同样记录可读告警', async () => {
+    const database = new DatabaseManager(path.join(tempDir, 'reveal-text-warning.db'));
+    database.prepare("INSERT INTO targets (id, name, url, config_json, created_at, updated_at) VALUES ('demo', '演示系统', 'https://example.com', '{}', 1, 1)").run();
+    database.prepare("INSERT INTO sessions (id, target_id, status, started_at) VALUES ('session-1', 'demo', 'running', 1)").run();
+    const logger = new AgentLogger(database, 'session-1', { consoleOutput: false });
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn().mockResolvedValue({ components: [], title: '页面', forms: [], dialogs: 0, loadingOverlays: 0 }),
+      locator: vi.fn((selector: string) => ({ all: async () => selector.includes('aria-haspopup') ? [{ click: vi.fn().mockRejectedValue('文本异常'), hover: vi.fn().mockRejectedValue('文本异常') }] : [] })),
+      keyboard: { press: vi.fn().mockResolvedValue(undefined) }, mouse: { click: vi.fn().mockResolvedValue(undefined) }, waitForTimeout: vi.fn(),
+    } as unknown as Page;
+    await new ComponentRevealer(logger).reveal(page, { phase: 'explore' });
+    expect(logger.getTimeline().some(log => log.result.error === '文本异常')).toBe(true);
+    database.close();
+  });
+
+  it('组件揭示失败为非 Error 值时也继续后续候选', async () => {
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn().mockResolvedValue({ components: [], title: '页面', forms: [], dialogs: 0, loadingOverlays: 0 }),
+      locator: vi.fn((selector: string) => ({
+        all: async () => selector.includes('aria-haspopup')
+          ? [{ click: vi.fn().mockRejectedValue({ code: 'stale-handle' }), hover: vi.fn().mockRejectedValue({ code: 'stale-handle' }) }]
+          : [],
+      })),
+      keyboard: { press: vi.fn().mockResolvedValue(undefined) },
+      mouse: { click: vi.fn().mockResolvedValue(undefined) },
+      waitForTimeout: vi.fn(),
+    } as unknown as Page;
+
+    await expect(new ComponentRevealer().reveal(page, { phase: 'explore' })).resolves.toMatchObject({ interactions: 0 });
+  });
+
+  it('组件揭示失败为 Error 时记录错误消息', async () => {
+    const logger = {
+      runScript: vi.fn(async (_trigger: unknown, _action: unknown, execute: () => unknown) => execute()),
+      logScript: vi.fn(),
+    };
+    const page = {
+      url: vi.fn().mockReturnValue('https://example.com/page'),
+      evaluate: vi.fn().mockResolvedValue({ components: [], title: '页面', forms: [], dialogs: 0, loadingOverlays: 0 }),
+      locator: vi.fn((selector: string) => ({
+        all: async () => selector.includes('aria-haspopup')
+          ? [{ click: vi.fn().mockRejectedValue(new Error('元素已失效')), hover: vi.fn().mockRejectedValue(new Error('元素已失效')) }]
+          : [],
+      })),
+      keyboard: { press: vi.fn().mockResolvedValue(undefined) },
+      mouse: { click: vi.fn().mockResolvedValue(undefined) },
+      waitForTimeout: vi.fn(),
+    } as unknown as Page;
+
+    await new ComponentRevealer(logger as never).reveal(page, { phase: 'explore' });
+    expect(logger.logScript).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ error: '元素已失效' }), expect.anything());
+  });
 });
 
 describe('NetworkFaultInjector', () => {

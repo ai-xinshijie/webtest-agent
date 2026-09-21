@@ -393,7 +393,7 @@ export class Orchestrator {
         enableChaos: index === 0,
         deadlineAt,
         caseIds: options.caseIds,
-      });
+      }, this.router);
       return engine.run(workerPage, assignedPages);
     });
 

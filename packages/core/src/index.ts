@@ -3,6 +3,7 @@ export { BrowserManager } from './browser/BrowserManager.js';
 export { StructuredPerceiver } from './perception/StructuredPerceiver.js';
 export { DatabaseManager } from './db/Database.js';
 export { LLMRouter } from './llm/LLMRouter.js';
+export { ModelDecisionGate } from './decision/ModelDecisionGate.js';
 export { AgentSelfHealer } from './healing/AgentSelfHealer.js';
 export { CodeSelfHealer, StrategyRegistry } from './healing/CodeSelfHealer.js';
 export { ExplorationFrontier } from './exploration/ExplorationFrontier.js';
@@ -54,6 +55,7 @@ export type {
 } from './cognition/ComponentModel.js';
 export { classifyComponent } from './cognition/ComponentModel.js';
 export type { StructuredObservation, ExtractedComponent, NetworkEvent, Observation } from './perception/types.js';
+export type { DecisionCandidate, ModelDecision, DecisionGateInput } from './decision/ModelDecisionGate.js';
 export type { QualityRule, RuleContext, RuleResult, RuleViolation } from './cognition/QualityRule.js';
 export { BUILTIN_RULES, QR001, QR002, QR006 } from './cognition/QualityRule.js';
 export type { AgentConfig, TargetConfig, ModelRouting } from './config/types.js';

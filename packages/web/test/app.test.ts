@@ -93,6 +93,14 @@ const timeline = [
     source: 'script' as const,
     trigger: { description: '未返回结果' },
   },
+  {
+    id: 'skipped-log',
+    sequence: 6,
+    timestamp: 1700000005000,
+    source: 'system' as const,
+    trigger: { description: '跳过视觉决策' },
+    result: { status: 'skipped' as const, duration: 0, output: { reason: '页面无变化' } },
+  },
 ];
 
 const memory = {
@@ -229,9 +237,10 @@ describe('Web GUI', () => {
     expect(screen.getByText('失败')).toBeTruthy();
     expect(screen.getAllByText('脚本').length).toBeGreaterThan(0);
     expect(screen.getByText('模型')).toBeTruthy();
-    expect(screen.getByText('系统')).toBeTruthy();
+    expect(screen.getAllByText('系统').length).toBeGreaterThan(0);
     expect(screen.getByText('用户')).toBeTruthy();
     expect(screen.getByText('未返回结果')).toBeTruthy();
+    expect(screen.getByText('跳过')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /执行登录/ }));
     fireEvent.click(screen.getByRole('button', { name: /识别组件/ }));

@@ -1,5 +1,5 @@
 import type { Page } from 'playwright';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseManager } from '../db/Database.js';
 import type { MemoryManager } from '../memory/MemoryManager.js';
 import type { AgentLogger } from '../logger/AgentLogger.js';
@@ -21,6 +21,9 @@ import { SemanticOracle } from '../testing/SemanticOracle.js';
 import { TestCaseManager } from './TestCaseManager.js';
 import { BUILTIN_RULES, type RuleContext } from '../cognition/QualityRule.js';
 import type { StructuredObservation } from '../perception/types.js';
+import { classifyComponent, classifyComponentScope } from '../cognition/ComponentModel.js';
+import type { LLMRouter } from '../llm/LLMRouter.js';
+import { ModelDecisionGate, type DecisionCandidate } from '../decision/ModelDecisionGate.js';
 
 interface PageRow {
   id: string;
@@ -36,6 +39,15 @@ interface ComponentRow {
   label: string | null;
   state_json: string | null;
   constraints_json: string | null;
+}
+
+interface PendingAction {
+  row: ComponentRow;
+  action: string;
+  source: 'script' | 'model';
+  currentState?: boolean;
+  modelReason?: string;
+  expectedState?: string;
 }
 
 export interface TestEngineOptions {
@@ -107,6 +119,7 @@ export class TestEngine {
   private pageFingerprints = new Map<string, string>();
   private cases: TestCaseManager;
   private selectedActionKeys = new Set<string>();
+  private decisionGate: ModelDecisionGate;
 
   constructor(
     private db: DatabaseManager,
@@ -114,6 +127,7 @@ export class TestEngine {
     private logger: AgentLogger,
     private executor: InteractionExecutor,
     private options: TestEngineOptions,
+    router?: LLMRouter,
   ) {
     this.revealer = new ComponentRevealer(logger);
     this.reachability = new ReachabilityResolver(logger);
@@ -121,6 +135,7 @@ export class TestEngine {
     this.stateGraph = new StateGraph(db);
     this.cases = new TestCaseManager(db);
     this.selectedActionKeys = this.cases.getActionKeys(options.caseIds ?? []);
+    this.decisionGate = new ModelDecisionGate(router, logger, this.modelDecisionLimit());
   }
 
   async run(page: Page, pages: PageRow[]): Promise<TestEngineResult> {
@@ -168,6 +183,11 @@ export class TestEngine {
   }
 
   private async testPageActions(page: Page, pageRow: PageRow): Promise<void> {
+    await this.testPageActionsWithModelQueue(page, pageRow);
+  }
+
+  /** 动作覆盖主循环。视觉模型只能选择本地生成的受控动作。 */
+  private async testPageActionsWithModelQueue(page: Page, pageRow: PageRow): Promise<void> {
     const components = this.getTestableComponents(pageRow.id);
     try {
       await this.navigate(page, pageRow);
@@ -175,129 +195,275 @@ export class TestEngine {
       this.recordNavigationBlocked(pageRow, components, error);
       return;
     }
+
     const fingerprint = await this.capturePageFingerprint(page, pageRow);
+    const pending: PendingAction[] = components.flatMap(row =>
+      this.actionsForComponent(row).map(action => ({ row, action, source: 'script' as const })),
+    );
 
-    for (const row of components) {
+    while (pending.length > 0) {
+      this.assertWithinDeadline();
+      const item = pending.shift()!;
+      const { row, action } = item;
       const component = this.toExtracted(row);
-      for (const action of this.actionsForComponent(row)) {
-        this.assertWithinDeadline();
-        const itemKey = `${this.options.targetId}:${row.id}:${action}`;
-        const availability = await this.reachability.resolve(page, component, action, {
-          pageUrl: pageRow.url_pattern, phase: 'test', componentId: row.id,
+      const itemKey = this.options.targetId + ':' + row.id + ':' + action;
+      const availability = await this.reachability.resolve(page, component, action, {
+        pageUrl: pageRow.url_pattern, phase: 'test', componentId: row.id,
+      });
+      if (!availability.reachable) {
+        this.skippedActions++;
+        this.persistResult({
+          componentId: row.id, testType: action, status: 'skipped',
+          input: { action, selector: row.selector, trigger: item.source === 'model' ? '模型优先级' : '脚本计划' },
+          output: { reason: availability.reason, status: availability.status, attempts: availability.attempts },
+          startedAt: Date.now(),
         });
-        if (!availability.reachable) {
-          this.skippedActions++;
-          this.persistResult({
-            componentId: row.id,
-            testType: action,
-            status: 'skipped',
-            input: { action, selector: row.selector },
-            output: { reason: availability.reason, status: availability.status, attempts: availability.attempts },
-            startedAt: Date.now(),
-          });
-          this.tracker.markBlocked(row.page_id, row.id, action);
-          continue;
-        }
-        if (this.shouldReuse(itemKey, row.page_id, fingerprint)) {
-          this.skippedActions++;
-          this.persistResult({
-            componentId: row.id,
-            testType: action,
-            status: 'skipped',
-            input: { action, selector: row.selector },
-            output: { reason: '页面未变更，复用历史通过测试结果', fingerprint },
-            startedAt: Date.now(),
-          });
-          this.tracker.markReused(row.page_id, row.id, action);
-          continue;
-        }
+        this.tracker.markBlocked(row.page_id, row.id, action);
+        if (!await this.resetAfterModelAction(page, pageRow, components)) return;
+        continue;
+      }
+      if (this.shouldReuse(itemKey, row.page_id, fingerprint)) {
+        this.skippedActions++;
+        this.persistResult({
+          componentId: row.id, testType: action, status: 'skipped',
+          input: { action, selector: row.selector, trigger: '历史复用' },
+          output: { reason: '页面未变更，复用历史通过测试结果', fingerprint },
+          startedAt: Date.now(),
+        });
+        this.tracker.markReused(row.page_id, row.id, action);
+        continue;
+      }
 
-        const startedAt = Date.now();
-        try {
-          const before = await this.perceiver.capture(page);
-          await this.executor.executeAction(page, component, action, {
-            context: { pageUrl: pageRow.url_pattern, phase: 'test' },
-          });
-          const after = await this.perceiver.capture(page);
-          const changed = JSON.stringify(before.components.length) !== JSON.stringify(after.components.length)
-            || page.url() !== pageRow.url_pattern;
-          const fromState = this.stateGraph.observe(this.options.targetId, pageRow.id, before);
-          const toState = this.stateGraph.observe(this.options.targetId, pageRow.id, after);
-          const oracle = this.oracle.evaluate({ action, before, after });
-          this.stateGraph.recordTransition({
-            sessionId: this.options.sessionId, targetId: this.options.targetId, from: fromState, to: toState,
-            componentId: row.id, action, status: 'passed', evidence: { changed, oracle },
-          });
-
-          this.persistResult({
-            componentId: row.id,
-            testType: action,
-            status: 'passed',
-            input: { action, selector: row.selector },
-            output: {
-              changed, url: page.url(), componentCount: after.components.length,
-              stateTransition: { from: fromState.id, to: toState.id }, oracle,
-            },
-            startedAt,
-          });
-          this.memory.markTested(this.options.targetId, {
-            itemKey,
-            componentId: row.id,
-            testType: action,
-            status: 'passed',
-          });
-          this.tracker.markVisited(row.page_id, row.id, action);
-          this.executedActions++;
-          await this.evaluateActionEvidence({
-            before,
-            after,
+      const startedAt = Date.now();
+      try {
+        const before = await this.perceiver.capture(page);
+        await this.executor.executeAction(page, component, action, {
+          context: { pageUrl: pageRow.url_pattern, phase: 'test', componentId: row.id },
+        });
+        const after = await this.perceiver.capture(page);
+        const changed = this.hasSemanticChange(before, after);
+        const fromState = this.stateGraph.observe(this.options.targetId, pageRow.id, before);
+        const toState = this.stateGraph.observe(this.options.targetId, pageRow.id, after);
+        const oracle = this.oracle.evaluate({ action, before, after });
+        this.stateGraph.recordTransition({
+          sessionId: this.options.sessionId, targetId: this.options.targetId, from: fromState, to: toState,
+          componentId: row.id, action, status: 'passed', evidence: { changed, oracle },
+        });
+        const dynamic = this.dynamicActionsFromObservation(pageRow, before, after, pending);
+        const decisionCandidates = [
+          ...this.toDecisionCandidates(dynamic),
+          ...this.toDecisionCandidates(pending),
+        ];
+        const nextDecision = await this.decisionGate.selectNext({
+          page, pageUrl: pageRow.url_pattern, before, after,
+          executedAction: { componentId: row.id, action, label: row.label ?? row.selector },
+          candidates: decisionCandidates,
+        });
+        const selectedDynamic = nextDecision
+          ? dynamic.find(item => item.row.id + ':' + item.action === nextDecision.candidateId)
+          : undefined;
+        if (nextDecision && selectedDynamic) {
+          selectedDynamic.modelReason = nextDecision.reason;
+          selectedDynamic.expectedState = nextDecision.expectedState;
+        } else if (nextDecision) {
+          this.promoteModelCandidate(pending, nextDecision);
+        }
+        this.persistResult({
+          componentId: row.id, testType: action, status: 'passed',
+          input: {
             action,
             selector: row.selector,
-            pageUrl: pageRow.url_pattern,
-          });
-          this.persistOracleViolations(oracle, pageRow.url_pattern, row.id);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          this.persistResult({
-            componentId: row.id,
-            testType: action,
-            status: 'failed',
-            input: { action, selector: row.selector },
-            output: { error: reason },
-            startedAt,
-          });
-          this.memory.markTested(this.options.targetId, {
-            itemKey,
-            componentId: row.id,
-            testType: action,
-            status: 'failed',
-          });
-          this.tracker.markVisited(row.page_id, row.id, action);
-          this.executedActions++;
+            trigger: item.source === 'model' ? '模型优先级' : '脚本计划',
+            modelReason: item.modelReason,
+            expectedState: item.expectedState,
+          },
+          output: { changed, url: page.url(), componentCount: after.components.length, stateTransition: { from: fromState.id, to: toState.id }, oracle, modelNextAction: nextDecision ?? undefined },
+          startedAt,
+        });
+        this.memory.markTested(this.options.targetId, { itemKey, componentId: row.id, testType: action, status: 'passed' });
+        this.tracker.markVisited(row.page_id, row.id, action);
+        this.executedActions++;
+        await this.evaluateActionEvidence({ before, after, action, selector: row.selector, pageUrl: pageRow.url_pattern });
+        this.persistOracleViolations(oracle, pageRow.url_pattern, row.id);
+        if (selectedDynamic) {
+          await this.executeDynamicAction(page, pageRow, selectedDynamic, after);
         }
-
-        try {
-          await this.navigate(page, pageRow);
-        } catch (error) {
-          this.logger.logSystem(
-            { description: '动作后页面复位失败，停止当前页面后续动作', module: 'TestEngine', method: 'testPageActions' },
-            { type: 'navigation-blocked', target: pageRow.url_pattern, params: { action } },
-            {
-              status: 'warning', duration: 0,
-              error: String(error).replace(/^Error: /, ''),
-            },
-            { pageUrl: pageRow.url_pattern, phase: 'test' },
-          );
-          this.recordNavigationBlocked(pageRow, components, error);
-          return;
-        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.persistResult({
+          componentId: row.id, testType: action, status: 'failed',
+          input: { action, selector: row.selector, trigger: item.source === 'model' ? '模型优先级' : '脚本计划' },
+          output: { error: reason }, startedAt,
+        });
+        this.memory.markTested(this.options.targetId, { itemKey, componentId: row.id, testType: action, status: 'failed' });
+        this.tracker.markVisited(row.page_id, row.id, action);
+        this.executedActions++;
       }
+      // 动作排序可以由模型调整，但每个独立动作都从页面基线开始，避免前一动作留下的弹层或跳转污染后续候选。
+      if (!await this.resetAfterModelAction(page, pageRow, components)) return;
     }
 
-    this.db.prepare(`
-      UPDATE pages SET test_status = 'tested', last_visited_at = ? WHERE id = ?
-    `).run(Date.now(), pageRow.id);
+    this.db.prepare("UPDATE pages SET test_status = 'tested', last_visited_at = ? WHERE id = ?").run(Date.now(), pageRow.id);
     this.memory.savePageFingerprint(this.options.targetId, pageRow.id, fingerprint);
+  }
+
+  private toDecisionCandidates(pending: PendingAction[]): DecisionCandidate[] {
+    return pending.slice(0, 12).map(item => ({
+      id: item.row.id + ':' + item.action, componentId: item.row.id, action: item.action,
+      label: (item.row.label ?? item.row.selector) + ' / ' + item.action,
+    }));
+  }
+
+  /**
+   * 从动作后的新结构中生成当前状态候选。候选仍由本地规则分类并绑定已有执行器，
+   * 模型只能在这些候选中选择，不能自行生成选择器、脚本或地址。
+   */
+  private dynamicActionsFromObservation(
+    pageRow: PageRow,
+    before: StructuredObservation,
+    after: StructuredObservation,
+    pending: PendingAction[],
+  ): PendingAction[] {
+    const baselineSelectors = new Set(this.getTestableComponents(pageRow.id).map(item => item.selector));
+    const pendingKeys = new Set(pending.map(item => item.row.id + ':' + item.action));
+    const beforeBySelector = new Map(before.components.map(item => [item.selector, item]));
+    const dynamic: PendingAction[] = [];
+
+    for (const extracted of after.components) {
+      if (!this.isEligibleDynamicComponent(extracted)) continue;
+      const selector = extracted.selector;
+      // 探索阶段已经登记的控件属于基线计划；只有此前未知的控件才是当前状态候选。
+      if (baselineSelectors.has(selector)) continue;
+      const classified = classifyComponent(extracted);
+      const scope = classifyComponentScope(extracted, classified.type);
+      if (classified.type === 'unknown' || scope === 'third-party' || scope === 'shell') continue;
+      const previous = beforeBySelector.get(selector);
+      const isNew = !previous
+        || !previous.state?.visible
+        || !previous.state?.enabled;
+      if (!isNew) continue;
+
+      const rowId = 'dynamic-' + createHash('sha1').update(`${pageRow.id}|${selector}`).digest('hex').slice(0, 16);
+      const row: ComponentRow = {
+        id: rowId,
+        page_id: pageRow.id,
+        type: classified.type,
+        selector,
+        label: extracted.text ?? extracted.ariaLabel ?? extracted.placeholder ?? selector,
+        state_json: JSON.stringify(extracted.state),
+        constraints_json: null,
+      };
+      for (const action of this.getActions(classified.type)) {
+        const key = row.id + ':' + action;
+        if (pendingKeys.has(key) || dynamic.some(item => item.row.id + ':' + item.action === key)) continue;
+        dynamic.push({ row, action, source: 'model', currentState: true });
+        if (dynamic.length >= 12) return dynamic;
+      }
+    }
+    return dynamic;
+  }
+
+  /** 降级观察不包含交互状态时不臆造新动作，保持原有脚本计划可继续执行。 */
+  private isEligibleDynamicComponent(component: ExtractedComponent): component is ExtractedComponent & { selector: string } {
+    return Boolean(
+      component.selector
+      && component.state
+      && component.state.visible
+      && component.state.enabled
+      && Array.isArray(component.classes)
+      && component.clickability,
+    );
+  }
+
+  private promoteModelCandidate(pending: PendingAction[], decision: { candidateId: string; reason: string; expectedState: string }): void {
+    const index = pending.findIndex(item => item.row.id + ':' + item.action === decision.candidateId);
+    if (index < 0) return;
+    const selected = pending.splice(index, 1)[0]!;
+    pending.unshift({ ...selected, source: 'model', modelReason: decision.reason, expectedState: decision.expectedState });
+  }
+
+  private async executeDynamicAction(
+    page: Page,
+    pageRow: PageRow,
+    item: PendingAction,
+    before: StructuredObservation,
+  ): Promise<void> {
+    const component = this.toExtracted(item.row);
+    const itemKey = `${this.options.targetId}:dynamic:${pageRow.id}:${item.row.selector}:${item.action}`;
+    const startedAt = Date.now();
+    try {
+      const availability = await this.reachability.resolve(page, component, item.action, {
+        pageUrl: pageRow.url_pattern, phase: 'test', componentId: item.row.id,
+      });
+      if (!availability.reachable) {
+        this.skippedActions++;
+        this.persistResult({
+          componentId: item.row.id, testType: item.action, status: 'skipped',
+          input: { action: item.action, selector: item.row.selector, trigger: '模型选择当前状态候选', modelReason: item.modelReason, expectedState: item.expectedState },
+          output: { reason: availability.reason, status: availability.status, attempts: availability.attempts }, startedAt,
+        });
+        return;
+      }
+
+      await this.executor.executeAction(page, component, item.action, {
+        context: { pageUrl: pageRow.url_pattern, phase: 'test', componentId: item.row.id },
+      });
+      const after = await this.perceiver.capture(page);
+      const fromState = this.stateGraph.observe(this.options.targetId, pageRow.id, before);
+      const toState = this.stateGraph.observe(this.options.targetId, pageRow.id, after);
+      const oracle = this.oracle.evaluate({ action: item.action, before, after });
+      this.stateGraph.recordTransition({
+        sessionId: this.options.sessionId, targetId: this.options.targetId, from: fromState, to: toState,
+        componentId: item.row.id, action: item.action, status: 'passed', evidence: { changed: this.hasSemanticChange(before, after), oracle, source: 'model' },
+      });
+      this.persistResult({
+        componentId: item.row.id, testType: item.action, status: 'passed',
+        input: { action: item.action, selector: item.row.selector, trigger: '模型选择当前状态候选', modelReason: item.modelReason, expectedState: item.expectedState },
+        output: { changed: this.hasSemanticChange(before, after), url: page.url(), componentCount: after.components.length, stateTransition: { from: fromState.id, to: toState.id }, oracle },
+        startedAt,
+      });
+      this.memory.markTested(this.options.targetId, { itemKey, componentId: item.row.id, testType: item.action, status: 'passed' });
+      this.executedActions++;
+      await this.evaluateActionEvidence({ before, after, action: item.action, selector: item.row.selector, pageUrl: pageRow.url_pattern });
+      this.persistOracleViolations(oracle, pageRow.url_pattern, item.row.id);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.persistResult({
+        componentId: item.row.id, testType: item.action, status: 'failed',
+        input: { action: item.action, selector: item.row.selector, trigger: '模型选择当前状态候选', modelReason: item.modelReason, expectedState: item.expectedState },
+        output: { error: reason }, startedAt,
+      });
+      this.memory.markTested(this.options.targetId, { itemKey, componentId: item.row.id, testType: item.action, status: 'failed' });
+      this.executedActions++;
+    }
+  }
+
+  private hasSemanticChange(before: StructuredObservation, after: StructuredObservation): boolean {
+    return this.fingerprint(before) !== this.fingerprint(after)
+      || before.dialogCount !== after.dialogCount
+      || before.loadingOverlayCount !== after.loadingOverlayCount;
+  }
+
+  /** 浅层测试只做一次引导，标准和深度测试允许更多状态分支由模型排序。 */
+  private modelDecisionLimit(): number {
+    const limits: Record<TargetConfig['strategy']['depth'], number> = { quick: 1, standard: 3, deep: 6 };
+    return limits[this.options.depth];
+  }
+
+  private async resetAfterModelAction(page: Page, pageRow: PageRow, components: ComponentRow[]): Promise<boolean> {
+    try {
+      await this.navigate(page, pageRow);
+      return true;
+    } catch (error) {
+      this.logger.logSystem(
+        { description: '动作后页面复位失败，停止当前页面后续动作', module: 'TestEngine', method: 'testPageActionsWithModelQueue' },
+        { type: 'navigation-blocked', target: pageRow.url_pattern },
+        { status: 'warning', duration: 0, error: error instanceof Error ? error.message : String(error) },
+        { pageUrl: pageRow.url_pattern, phase: 'test' },
+      );
+      this.recordNavigationBlocked(pageRow, components, error);
+      return false;
+    }
   }
 
   private async testPageCombinations(page: Page, pageRow: PageRow): Promise<void> {

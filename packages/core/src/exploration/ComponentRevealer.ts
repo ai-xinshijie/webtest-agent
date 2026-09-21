@@ -28,6 +28,8 @@ export class ComponentRevealer {
   }
 
   async reveal(page: Page, context: AgentLogContext = { phase: 'explore' }): Promise<RevealResult> {
+    // 先关闭公告、引导和其他阻塞层，否则底层候选元素会被 Playwright 正确判定为不可操作。
+    await this.closeTransient(page, context);
     const before = await this.capture(page, context);
     const beforeSelectors = new Set(before.components.map(component => component.selector ?? component.tag));
     let interactions = 0;
@@ -84,17 +86,31 @@ export class ComponentRevealer {
         await page.waitForTimeout(250);
       };
 
-      if (this.logger) {
-        await this.logger.runScript(
-          { description: step.description, module: 'ComponentRevealer', method: step.action },
-          { type: 'reveal', target: step.selector },
-          execute,
+      try {
+        if (this.logger) {
+          await this.logger.runScript(
+            { description: step.description, module: 'ComponentRevealer', method: step.action },
+            { type: 'reveal', target: step.selector },
+            execute,
+            context,
+          );
+        } else {
+          await execute();
+        }
+        count++;
+      } catch (error) {
+        // 一个被遮挡或已失效的候选控件不应中断整页探索；保留日志并继续其他候选。
+        this.logger?.logScript(
+          { description: step.description + '：跳过不可操作候选', module: 'ComponentRevealer', method: step.action },
+          { type: 'reveal-skip', target: step.selector },
+          {
+            status: 'warning',
+            duration: 0,
+            error: error instanceof Error ? error.message : String(error),
+          },
           context,
         );
-      } else {
-        await execute();
       }
-      count++;
     }
 
     return count;
@@ -103,6 +119,26 @@ export class ComponentRevealer {
   private async closeTransient(page: Page, context: AgentLogContext): Promise<void> {
     const execute = async () => {
       await page.keyboard.press('Escape').catch(() => {});
+      const closeSelectors = [
+        '.semi-modal-wrap button',
+        '.semi-modal-wrap [role="button"]',
+        '[role="dialog"] button',
+        '[role="dialog"] [role="button"]',
+        'button[aria-label="关闭"]',
+        'button[aria-label="Close"]',
+      ];
+
+      for (const selector of closeSelectors) {
+        const candidates = await page.locator(selector).all();
+        for (const candidate of candidates) {
+          try {
+            await candidate.click({ timeout: 2000 });
+            return;
+          } catch {
+            // 继续尝试同一遮罩层中的其他关闭入口。
+          }
+        }
+      }
       await page.mouse.click(4, 4).catch(() => {});
     };
 

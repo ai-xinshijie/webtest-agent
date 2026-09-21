@@ -520,7 +520,7 @@ export default function App() {
                         <span className={`source ${log.source}`}>{sourceText[log.source]}</span>
                         <span className="description">{log.trigger?.description ?? '未命名操作'}</span>
                         <span className={`result ${log.result?.status ?? 'success'}`}>
-                          {log.result?.status === 'failed' ? '失败' : log.result?.status === 'warning' ? '警告' : '成功'}
+                            {log.result?.status === 'failed' ? '失败' : log.result?.status === 'warning' ? '警告' : log.result?.status === 'skipped' ? '跳过' : '成功'}
                         </span>
                         <span className="duration">{log.result?.duration ?? 0}ms</span>
                       </button>

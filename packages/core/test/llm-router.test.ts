@@ -175,4 +175,57 @@ describe('LLMRouter', () => {
     await expect(router.call('test', messages)).resolves.toBe('备用内容');
     expect((fetchMock.mock.calls[0]![1] as RequestInit).headers).not.toHaveProperty('Authorization');
   });
+
+  it('视觉模型请求附带标准 PNG data URL，并将文字摘要写入审计日志', async () => {
+    fetchMock.mockResolvedValue(response({ choices: [{ message: { content: '{"candidateId":"x"}' } }] }));
+    const logger = createLogger();
+    const router = new LLMRouter({
+      'visual-analysis': { provider: 'custom', model: 'gemini-2.5-flash-lite', baseUrl: 'http://vision.test/v1/chat/completions', apiKey: 'vision-key', temperature: 0, maxTokens: 100 },
+    });
+
+    await expect(router.callVisionWithLog('visual-analysis', messages, 'c2NyZWVuc2hvdA==', logger, { phase: 'test' }))
+      .resolves.toBe('{"candidateId":"x"}');
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    const body = JSON.parse(String(init.body));
+    const expectedImageUrl = 'data' + ':image/png;base64,' + 'c2NyZWVuc2hvdA==';
+    expect(body.messages.at(-1).content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: expectedImageUrl },
+    });
+    const modelCall = logger.getModelCalls()[0]!;
+    expect(modelCall.model?.request.messages.at(-1)?.content).toContain('已附加当前页面 PNG 截图');
+    expect(JSON.stringify(modelCall)).not.toContain('c2NyZWVuc2hvdA==');
+  });
+
+  it('视觉模型配置不完整或提供方不兼容时给出明确错误', async () => {
+    const logger = createLogger();
+    await expect(new LLMRouter({}).callVisionWithLog('missing', messages, 'image', logger, { phase: 'test' }))
+      .rejects.toThrow('未配置任务类型 missing 的模型路由');
+    await expect(new LLMRouter({ vision: { provider: 'ollama', model: 'vision', baseUrl: 'http://ollama.test', temperature: 0, maxTokens: 1 } })
+      .callVisionWithLog('vision', messages, 'image', logger, { phase: 'test' }))
+      .rejects.toThrow('视觉模型当前仅支持 OpenAI 兼容接口');
+    await expect(new LLMRouter({ vision: { provider: 'custom', model: 'vision', baseUrl: 'http://vision.test', temperature: 0, maxTokens: 1 } })
+      .callVisionWithLog('vision', messages, 'image', logger, { phase: 'test' }))
+      .rejects.toThrow('未配置视觉模型 API Key');
+    await expect(new LLMRouter({ vision: { provider: 'custom', model: 'vision', apiKey: 'key', temperature: 0, maxTokens: 1 } })
+      .callVisionWithLog('vision', messages, 'image', logger, { phase: 'test' }))
+      .rejects.toThrow('自定义视觉模型必须配置 baseUrl');
+  });
+
+  it('视觉模型响应缺少内容时返回空字符串', async () => {
+    fetchMock.mockResolvedValue(response({ choices: [{ message: {} }] }));
+    const router = new LLMRouter({
+      vision: { provider: 'custom', model: 'vision', baseUrl: 'http://vision.test', apiKey: 'key', temperature: 0, maxTokens: 1 },
+    });
+    await expect(router.callVisionWithLog('vision', messages, 'image', createLogger(), { phase: 'test' })).resolves.toBe('');
+  });
+
+  it('视觉模型 HTTP 失败时保留响应状态和错误文本', async () => {
+    fetchMock.mockResolvedValue(response({ error: '视觉服务故障' }, false));
+    const router = new LLMRouter({
+      vision: { provider: 'custom', model: 'vision', baseUrl: 'http://vision.test', apiKey: 'key', temperature: 0, maxTokens: 1 },
+    });
+    await expect(router.callVisionWithLog('vision', messages, 'image', createLogger(), { phase: 'test' }))
+      .rejects.toThrow('视觉模型请求失败：500 {"error":"视觉服务故障"}');
+  });
 });
